@@ -1,0 +1,94 @@
+#pragma code_page(65001)
+
+#include <windows.h>
+#include <commctrl.h>
+#include "resource.h"
+
+IDI_CLICKSHOW ICON "@CLICKSHOW_ICON@"
+1 RT_MANIFEST "@CLICKSHOW_MANIFEST@"
+
+IDD_MAIN DIALOGEX 0, 0, 280, 348
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+CAPTION "ClickShow"
+FONT 9, "Microsoft YaHei UI", 400, 0, 0x86
+BEGIN
+    CONTROL "显示点击特效(_C)", IDC_CHK_CIRCLE, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 8, 130, 12
+    CONTROL "显示位置提示浮标(_F)", IDC_CHK_HOVER, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 26, 150, 12
+    CONTROL "启用点击计数(_N)", IDC_CHK_COUNT, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 44, 130, 12
+    CONTROL "开机自动启动(_S)", IDC_CHK_AUTOSTART, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 10, 62, 130, 12
+
+    CONTROL "点击波纹", -1, "Button", BS_GROUPBOX, 8, 82, 264, 116
+    LTEXT "大小:", -1, 18, 96, 30, 10
+    LTEXT "150", IDC_TXT_SIZE, 50, 96, 30, 10
+    CONTROL "", IDC_SLIDER_SIZE, "msctls_trackbar32", TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 84, 92, 180, 18
+
+    CONTROL "左键", IDC_CHK_BTN_LEFT, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 114, 70, 12
+    CONTROL "颜色", IDC_BTN_COLOR_LEFT, "Button", BS_OWNERDRAW | WS_TABSTOP, 100, 112, 52, 15
+    CONTROL "中键", IDC_CHK_BTN_MIDDLE, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 131, 70, 12
+    CONTROL "颜色", IDC_BTN_COLOR_MIDDLE, "Button", BS_OWNERDRAW | WS_TABSTOP, 100, 129, 52, 15
+    CONTROL "右键", IDC_CHK_BTN_RIGHT, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 148, 70, 12
+    CONTROL "颜色", IDC_BTN_COLOR_RIGHT, "Button", BS_OWNERDRAW | WS_TABSTOP, 100, 146, 52, 15
+    CONTROL "侧键(后退)", IDC_CHK_BTN_X1, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 165, 78, 12
+    CONTROL "颜色", IDC_BTN_COLOR_X1, "Button", BS_OWNERDRAW | WS_TABSTOP, 100, 163, 52, 15
+    CONTROL "侧键(前进)", IDC_CHK_BTN_X2, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 182, 78, 12
+    CONTROL "颜色", IDC_BTN_COLOR_X2, "Button", BS_OWNERDRAW | WS_TABSTOP, 100, 180, 52, 15
+
+    CONTROL "位置浮标", -1, "Button", BS_GROUPBOX, 8, 204, 264, 56
+    LTEXT "大小:", -1, 18, 218, 30, 10
+    LTEXT "60", IDC_TXT_HOVER, 50, 218, 30, 10
+    CONTROL "", IDC_SLIDER_HOVER, "msctls_trackbar32", TBS_HORZ | TBS_AUTOTICKS | WS_TABSTOP, 84, 214, 180, 18
+    LTEXT "颜色:", -1, 18, 236, 30, 10
+    CONTROL "颜色", IDC_BTN_COLOR_HOVER, "Button", BS_OWNERDRAW | WS_TABSTOP, 50, 234, 52, 15
+
+    CONTROL "点击计数", -1, "Button", BS_GROUPBOX, 8, 266, 264, 42
+    LTEXT "左键", -1, 16, 276, 24, 10
+    LTEXT "0", IDC_TXT_LEFT, 42, 276, 30, 10
+    LTEXT "右键", -1, 78, 276, 24, 10
+    LTEXT "0", IDC_TXT_RIGHT, 104, 276, 30, 10
+    LTEXT "中键", -1, 140, 276, 24, 10
+    LTEXT "0", IDC_TXT_MIDDLE, 166, 276, 30, 10
+    LTEXT "侧键1", -1, 16, 292, 30, 10
+    LTEXT "0", IDC_TXT_X1, 48, 292, 26, 10
+    LTEXT "侧键2", -1, 78, 292, 30, 10
+    LTEXT "0", IDC_TXT_X2, 110, 292, 26, 10
+    LTEXT "合计", -1, 140, 292, 24, 10
+    LTEXT "0", IDC_TXT_TOTAL, 166, 292, 40, 10
+
+    LTEXT "已有新版本!", IDC_LBL_NEWVERSION, 8, 312, 90, 10
+    PUSHBUTTON "默认值", IDC_BTN_DEFAULT, 8, 326, 56, 15
+    PUSHBUTTON "重置计数", IDC_BTN_RESET_COUNT, 68, 326, 58, 15
+    PUSHBUTTON "反馈与更新", IDC_BTN_HOME, 130, 326, 64, 15
+    PUSHBUTTON "退出", IDC_BTN_EXIT, 198, 326, 74, 15
+END
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,5,0,0
+ PRODUCTVERSION 1,5,0,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "ClickShow"
+            VALUE "FileDescription", "ClickShow C++"
+            VALUE "FileVersion", "1.5.0.0"
+            VALUE "InternalName", "ClickShow"
+            VALUE "OriginalFilename", "ClickShow.exe"
+            VALUE "ProductName", "ClickShow"
+            VALUE "ProductVersion", "1.5.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
