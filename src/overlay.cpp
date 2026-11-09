@@ -230,6 +230,10 @@ void RippleWindow::Hide() {
     active_ = false;
 }
 
+void RippleWindow::ReapplyDisplayAffinity() {
+    SetWindowDisplayAffinitySafe(window_);
+}
+
 LRESULT CALLBACK RippleWindow::WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     return LayeredWndProc(window, message, wParam, lParam);
 }
@@ -424,6 +428,10 @@ void HoverWindow::Hide() {
     visible_ = false;
 }
 
+void HoverWindow::ReapplyDisplayAffinity() {
+    SetWindowDisplayAffinitySafe(window_);
+}
+
 LRESULT CALLBACK HoverWindow::WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     return LayeredWndProc(window, message, wParam, lParam);
 }
@@ -456,6 +464,7 @@ void Overlay::Stop() {
 
     hidden_ = false;
     hoverDirty_ = false;
+    captureSuppressed_ = false;
     // Drop the window handle so a queued timer callback cannot call SetTimer on
     // a handle Windows may already have recycled.
     notifyWindow_ = nullptr;
@@ -464,7 +473,7 @@ void Overlay::Stop() {
 void Overlay::ApplySettings(const Settings& settings) {
     settings_ = settings;
 
-    if (hidden_ || !settings_.enableHoverDot) {
+    if (hidden_ || captureSuppressed_ || !settings_.enableHoverDot) {
         hover_.Hide();
     } else {
         POINT point{};
@@ -483,7 +492,7 @@ void Overlay::ApplySettings(const Settings& settings) {
 }
 
 void Overlay::ShowRipple(int button, bool down, POINT point) {
-    if (hidden_ || !settings_.enableClickCircle) {
+    if (IsHidden() || !settings_.enableClickCircle) {
         return;
     }
     if (button < 0 || button >= kButtonCount || !settings_.buttons[button].enabled) {
@@ -502,7 +511,7 @@ void Overlay::ShowRipple(int button, bool down, POINT point) {
 }
 
 void Overlay::UpdateHover(POINT point) {
-    if (hidden_ || !settings_.enableHoverDot) {
+    if (IsHidden() || !settings_.enableHoverDot) {
         return;
     }
     hoverPoint_ = point;
@@ -525,7 +534,7 @@ void Overlay::HideForScreenshot() {
 
 void Overlay::RestoreAfterScreenshot() {
     hidden_ = false;
-    if (!settings_.enableHoverDot) {
+    if (captureSuppressed_ || !settings_.enableHoverDot) {
         return;
     }
     POINT point{};
@@ -533,6 +542,36 @@ void Overlay::RestoreAfterScreenshot() {
     hoverPoint_ = point;
     hoverDirty_ = true;
     EnsureTimer();
+}
+
+void Overlay::ReapplyDisplayAffinity() {
+    hover_.ReapplyDisplayAffinity();
+    for (auto& ripple : ripples_) {
+        ripple->ReapplyDisplayAffinity();
+    }
+}
+
+void Overlay::SetCaptureSuppressed(bool suppressed) {
+    if (captureSuppressed_ == suppressed) {
+        return;
+    }
+    captureSuppressed_ = suppressed;
+
+    if (suppressed) {
+        // The screenshot tool owns the screen now; get the dot out of its way.
+        hover_.Hide();
+        hoverDirty_ = false;
+        StopTimerIfIdle();
+        return;
+    }
+
+    if (!hidden_ && settings_.enableHoverDot) {
+        POINT point{};
+        GetCursorPos(&point);
+        hoverPoint_ = point;
+        hoverDirty_ = true;
+        EnsureTimer();
+    }
 }
 
 void Overlay::Tick() {
@@ -603,7 +642,7 @@ void Overlay::StopTimerIfIdle() {
 }
 
 void Overlay::UpdateHoverNow() {
-    if (hidden_ || !settings_.enableHoverDot) {
+    if (hidden_ || captureSuppressed_ || !settings_.enableHoverDot) {
         hover_.Hide();
         hoverDirty_ = false;
         return;

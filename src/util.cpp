@@ -373,12 +373,40 @@ UINT GetDpiForWindowSafe(HWND window) {
     return dpi >= 48 ? static_cast<UINT>(dpi) : 96;
 }
 
-void SetWindowDisplayAffinitySafe(HWND window) {
+bool SetWindowDisplayAffinitySafe(HWND window) {
     if (window == nullptr) {
-        return;
+        return false;
     }
-    constexpr DWORD kExcludeFromCapture = 0x00000011;
-    SetWindowDisplayAffinity(window, kExcludeFromCapture);
+    constexpr DWORD kWdaExcludeFromCapture = 0x00000011; // Win10 2004+
+    constexpr DWORD kWdaMonitor = 0x00000001;            // Win7+
+
+    if (SetWindowDisplayAffinity(window, kWdaExcludeFromCapture)) {
+        return true;
+    }
+
+    // Older systems reject WDA_EXCLUDEFROMCAPTURE. WDA_MONITOR still keeps the
+    // window out of captures on those systems (it shows up black), which is far
+    // better than the indicator being baked into every screenshot.
+    const DWORD firstError = GetLastError();
+    if (SetWindowDisplayAffinity(window, kWdaMonitor)) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            LogError(L"Overlay.Affinity",
+                     L"WDA_EXCLUDEFROMCAPTURE 不可用（" + Win32ErrorMessage(firstError) +
+                     L"），已退回 WDA_MONITOR；截图里该窗口会显示为黑色块");
+        }
+        return true;
+    }
+
+    static bool failureLogged = false;
+    if (!failureLogged) {
+        failureLogged = true;
+        LogError(L"Overlay.Affinity",
+                 L"SetWindowDisplayAffinity 失败，截图排除不生效：" +
+                 Win32ErrorMessage(GetLastError()));
+    }
+    return false;
 }
 
 std::wstring Utf8ToWide(const std::string& text) {

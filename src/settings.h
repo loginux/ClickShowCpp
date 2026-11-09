@@ -47,6 +47,9 @@ struct Settings {
     bool enableClickCircle = true;
     bool enableHoverDot = false;
     bool enableClickCount = false;
+    // Hide the hover dot while another application covers the whole screen,
+    // which is what screenshot tools do while you pick a region.
+    bool hideDotDuringCapture = true;
     int indicatorSize = 150;
     int hoverDotSize = 60;
     COLORREF hoverDotColor = RGB(255, 255, 90);

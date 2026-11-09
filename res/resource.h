@@ -8,6 +8,7 @@
 #define IDC_CHK_HOVER               1002
 #define IDC_CHK_COUNT               1003
 #define IDC_CHK_AUTOSTART           1004
+#define IDC_CHK_HIDE_ON_CAPTURE     1005
 
 #define IDC_SLIDER_SIZE             1010
 #define IDC_TXT_SIZE                1011
