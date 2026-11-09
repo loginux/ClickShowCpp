@@ -105,7 +105,6 @@ void ExitApplication();
 void OnInputButton(clickshow::InputButton button, bool down, POINT point);
 void OnInputMove(POINT point);
 void OnPrintScreen();
-void OnCaptureShortcut();
 bool IsAutoStartEnabled();
 bool SetAutoStart(bool enable);
 void UpdateCaptureSuppression();
@@ -348,20 +347,6 @@ void OnPrintScreen() {
     if (g_mainWindow != nullptr) {
         // One shot: no need to poll every 50 ms for a full second.
         SetTimer(g_mainWindow, kTimerScreenshot, 1000, nullptr);
-    }
-}
-
-void OnCaptureShortcut() {
-    if (g_exiting || !g_settings.hideDotDuringCapture) {
-        return;
-    }
-    // Hide right now: the tool is about to freeze the screen, and its own
-    // overlay window (handled by UpdateCaptureSuppression) only shows up after
-    // that. 400 ms is enough to cover the grab without a long visible gap when
-    // a hotkey is used for something else.
-    g_overlay.HideForScreenshot();
-    if (g_mainWindow != nullptr) {
-        SetTimer(g_mainWindow, kTimerScreenshot, 400, nullptr);
     }
 }
 
@@ -1130,7 +1115,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     callbacks.onButton = OnInputButton;
     callbacks.onMove = OnInputMove;
     callbacks.onPrintScreen = OnPrintScreen;
-    callbacks.onCaptureShortcut = OnCaptureShortcut;
     if (!g_rawInput.Start(instance, std::move(callbacks))) {
         clickshow::LogError(L"Startup.RawInput", L"全局输入初始化失败");
         MessageBoxW(nullptr, L"初始化全局鼠标输入失败，点击特效可能无法工作。", L"ClickShow",

@@ -15,10 +15,7 @@ enum class InputButton {
 struct InputCallbacks {
     std::function<void(InputButton, bool, POINT)> onButton;
     std::function<void(POINT)> onMove;
-    // System capture keys (PrintScreen, Win+Shift+S).
     std::function<void()> onPrintScreen;
-    // Default hotkeys of third-party capture tools (PixPin, WeChat, QQ, ...).
-    std::function<void()> onCaptureShortcut;
 };
 
 class RawInput {
