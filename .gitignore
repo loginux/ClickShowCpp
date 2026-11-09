@@ -1,4 +1,14 @@
+# 构建产物
 build/
+build-vs/
 build_direct/
-# Local agent workspace data (notes, session state); not part of the project.
+
+# Visual Studio / CMake 用户文件
+.vs/
+*.user
+*.suo
+*.VC.db
+CMakeUserPresets.json
+
+# 本地 AI 助手工作区数据（笔记、会话状态），不属于项目
 .workbuddy-ai/
