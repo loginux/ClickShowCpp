@@ -66,7 +66,6 @@ void TestSettingsRoundtrip(const std::wstring& dir) {
     settings.enableClickCircle = false;
     settings.enableHoverDot = true;
     settings.enableClickCount = true;
-    settings.hideDotDuringCapture = false;
     settings.indicatorSize = 275;
     settings.hoverDotSize = 33;
     settings.hoverDotColor = RGB(0x12, 0x34, 0x56);
@@ -88,10 +87,6 @@ void TestSettingsRoundtrip(const std::wstring& dir) {
     CHECK(!store.ConsumeLoadError(), L"a written file is not reported as corrupt");
     CHECK(loaded.enableClickCircle == false && loaded.enableHoverDot == true &&
           loaded.enableClickCount == true, L"boolean settings round-trip");
-    CHECK(loaded.hideDotDuringCapture == false,
-          L"hideDotDuringCapture round-trips");
-    CHECK(json.find(L"\"HideDotDuringCapture\":false") != std::wstring::npos,
-          L"hideDotDuringCapture is written to the JSON");
     CHECK(loaded.indicatorSize == 275 && loaded.hoverDotSize == 33,
           L"size settings round-trip");
     CHECK(loaded.hoverDotColor == settings.hoverDotColor && loaded.hoverDotAlpha == 0x77,

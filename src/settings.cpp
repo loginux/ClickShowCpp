@@ -168,9 +168,6 @@ LoadStatus SettingsStore::LoadJson(Settings& settings) const {
     if (const auto* value = root.Find(L"EnableHoverDot")) {
         settings.enableHoverDot = value->AsBool(settings.enableHoverDot);
     }
-    if (const auto* value = root.Find(L"HideDotDuringCapture")) {
-        settings.hideDotDuringCapture = value->AsBool(settings.hideDotDuringCapture);
-    }
     if (const auto* value = root.Find(L"HoverDotFill")) {
         COLORREF color = settings.hoverDotColor;
         BYTE alpha = settings.hoverDotAlpha;
@@ -233,8 +230,6 @@ bool SettingsStore::SaveJson(const Settings& settings) const {
     out += settings.enableClickCount ? L"true" : L"false";
     out += L",\"EnableHoverDot\":";
     out += settings.enableHoverDot ? L"true" : L"false";
-    out += L",\"HideDotDuringCapture\":";
-    out += settings.hideDotDuringCapture ? L"true" : L"false";
     out += L",\"HoverDotFill\":\"";
     out += ColorToArgb(settings.hoverDotColor, settings.hoverDotAlpha);
     out += L"\",\"HoverDotSize\":";

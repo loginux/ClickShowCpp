@@ -31,7 +31,6 @@ namespace {
 constexpr UINT_PTR kTimerSave = 2;
 constexpr UINT_PTR kTimerCounts = 3;
 constexpr UINT_PTR kTimerScreenshot = 4;
-constexpr UINT_PTR kTimerCaptureCheck = 5;
 
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kUpdateMessage = WM_APP + 2;
@@ -65,7 +64,6 @@ bool g_trayIconOwned = false;
 std::atomic<bool> g_exiting{false};
 UINT g_taskbarCreatedMessage = 0;
 ULONG_PTR g_gdiplusToken = 0;
-HWINEVENTHOOK g_foregroundHook = nullptr;
 
 clickshow::Settings g_settings;
 clickshow::SettingsStore g_settingsStore;
@@ -107,7 +105,6 @@ void OnInputMove(POINT point);
 void OnPrintScreen();
 bool IsAutoStartEnabled();
 bool SetAutoStart(bool enable);
-void UpdateCaptureSuppression();
 void AddTrayIcon();
 void RemoveTrayIcon();
 void StartUpdateCheck();
@@ -164,7 +161,6 @@ void SetControlsFromSettings() {
     setCheck(IDC_CHK_CIRCLE, g_settings.enableClickCircle);
     setCheck(IDC_CHK_HOVER, g_settings.enableHoverDot);
     setCheck(IDC_CHK_COUNT, g_settings.enableClickCount);
-    setCheck(IDC_CHK_HIDE_ON_CAPTURE, g_settings.hideDotDuringCapture);
     setCheck(IDC_CHK_AUTOSTART, IsAutoStartEnabled());
 
     auto setSlider = [&](int controlId, int value, int minimum, int maximum) {
@@ -347,102 +343,6 @@ void OnPrintScreen() {
     if (g_mainWindow != nullptr) {
         // One shot: no need to poll every 50 ms for a full second.
         SetTimer(g_mainWindow, kTimerScreenshot, 1000, nullptr);
-    }
-}
-
-// Screenshot tools (PixPin, Snipaste, the Snipping Tool...) normally put a
-// borderless window over the whole virtual screen while you pick a region.
-// The hover dot is topmost, so it sits on top of that window and ends up
-// annoying both in the way and on screen. Detect that state and hide the dot.
-// The actual capture is still excluded through WDA_EXCLUDEFROMCAPTURE; this
-// only covers the time the tool itself is displayed.
-struct FullscreenProbe {
-    RECT window{};
-    bool matched = false;
-};
-
-BOOL CALLBACK FullscreenMonitorProc(HMONITOR monitor, HDC, LPRECT, LPARAM data) {
-    auto* probe = reinterpret_cast<FullscreenProbe*>(data);
-    MONITORINFO info{};
-    info.cbSize = sizeof(info);
-    if (!GetMonitorInfoW(monitor, &info)) {
-        return TRUE;
-    }
-    const RECT& screen = info.rcMonitor;
-    constexpr int kTolerance = 4;
-    const bool covered =
-        probe->window.left <= screen.left + kTolerance &&
-        probe->window.top <= screen.top + kTolerance &&
-        probe->window.right >= screen.right - kTolerance &&
-        probe->window.bottom >= screen.bottom - kTolerance;
-    if (covered) {
-        probe->matched = true;
-        return FALSE;
-    }
-    return TRUE;
-}
-
-bool IsFullscreenOtherAppWindow(HWND window) {
-    if (window == nullptr || window == g_mainWindow) {
-        return false;
-    }
-    DWORD processId = 0;
-    GetWindowThreadProcessId(window, &processId);
-    if (processId == 0 || processId == GetCurrentProcessId()) {
-        return false;
-    }
-    if (!IsWindowVisible(window) || IsIconic(window)) {
-        return false;
-    }
-
-    // A maximized ordinary window also covers the monitor (its DWM frame even
-    // extends past it), so require a borderless window. That is what screenshot
-    // tools and full-screen apps create; normal apps keep a caption.
-    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
-    if ((style & WS_CAPTION) != 0) {
-        return false;
-    }
-
-    // The desktop, taskbar and the task switcher are full-screen as well.
-    wchar_t className[64]{};
-    if (GetClassNameW(window, className, ARRAYSIZE(className)) > 0) {
-        static const wchar_t* const kShellClasses[] = {
-            L"Progman",
-            L"WorkerW",
-            L"Shell_TrayWnd",
-            L"Shell_SecondaryTrayWnd",
-            L"NotifyIconOverflowWindow",
-            L"MultitaskingViewFrame",
-            L"XamlExplorerHostIslandWindow",
-        };
-        for (const wchar_t* shellClass : kShellClasses) {
-            if (wcscmp(className, shellClass) == 0) {
-                return false;
-            }
-        }
-    }
-
-    FullscreenProbe probe;
-    if (!GetWindowRect(window, &probe.window)) {
-        return false;
-    }
-    // Some tools cover the whole virtual screen, others only the monitor with
-    // the cursor, so check every monitor instead of just the bounding box.
-    EnumDisplayMonitors(nullptr, nullptr, FullscreenMonitorProc,
-                        reinterpret_cast<LPARAM>(&probe));
-    return probe.matched;
-}
-
-void UpdateCaptureSuppression() {
-    const bool suppress = g_settings.hideDotDuringCapture &&
-                          IsFullscreenOtherAppWindow(GetForegroundWindow());
-    g_overlay.SetCaptureSuppressed(suppress);
-}
-
-void CALLBACK ForegroundChangedProc(HWINEVENTHOOK, DWORD event, HWND, LONG idObject,
-                                    LONG, DWORD, DWORD) {
-    if (event == EVENT_SYSTEM_FOREGROUND && idObject == OBJID_WINDOW) {
-        UpdateCaptureSuppression();
     }
 }
 
@@ -782,13 +682,6 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             ScheduleSave();
             return TRUE;
 
-        case IDC_CHK_HIDE_ON_CAPTURE:
-            g_settings.hideDotDuringCapture =
-                IsDlgButtonChecked(window, IDC_CHK_HIDE_ON_CAPTURE) == BST_CHECKED;
-            UpdateCaptureSuppression();
-            ScheduleSave();
-            return TRUE;
-
         case IDC_CHK_AUTOSTART: {
             const bool enable = IsDlgButtonChecked(window, IDC_CHK_AUTOSTART) == BST_CHECKED;
             if (!SetAutoStart(enable)) {
@@ -921,11 +814,6 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             g_overlay.RestoreAfterScreenshot();
             KillTimer(window, kTimerScreenshot);
             return TRUE;
-        case kTimerCaptureCheck:
-            // Safety net for the foreground hook: it misses elevated tools and
-            // tools that reuse an already-visible window. One check per second.
-            UpdateCaptureSuppression();
-            return TRUE;
         default:
             break;
         }
@@ -1002,8 +890,6 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
     case WM_DISPLAYCHANGE:
     case WM_DPICHANGED:
         clickshow::InvalidateDpiCache();
-        g_overlay.ReapplyDisplayAffinity();
-        UpdateCaptureSuppression();
         break;
 
     case WM_QUERYENDSESSION:
@@ -1023,7 +909,6 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         KillTimer(window, kTimerSave);
         KillTimer(window, kTimerCounts);
         KillTimer(window, kTimerScreenshot);
-        KillTimer(window, kTimerCaptureCheck);
         KillTimer(window, clickshow::kOverlayTimerId);
 
         // Match OnClosed: settings first, then stop input, then counts and tray.
@@ -1105,12 +990,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         clickshow::LogError(L"Startup.Overlay", L"覆盖层初始化失败");
     }
 
-    // Event-driven: no polling. The callback is delivered on this thread.
-    g_foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
-                                       nullptr, ForegroundChangedProc, 0, 0,
-                                       WINEVENT_OUTOFCONTEXT);
-    UpdateCaptureSuppression();
-
     clickshow::InputCallbacks callbacks;
     callbacks.onButton = OnInputButton;
     callbacks.onMove = OnInputMove;
@@ -1122,7 +1001,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     SetTimer(g_mainWindow, kTimerCounts, 10 * 60 * 1000, nullptr);
-    SetTimer(g_mainWindow, kTimerCaptureCheck, 1000, nullptr);
     StartUpdateCheck();
 
     MSG message{};
@@ -1147,10 +1025,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     StopUpdateCheck();
-    if (g_foregroundHook != nullptr) {
-        UnhookWinEvent(g_foregroundHook);
-        g_foregroundHook = nullptr;
-    }
     g_rawInput.Stop();
     g_overlay.Stop();
     RemoveTrayIcon();

@@ -24,7 +24,6 @@ public:
     void Start(COLORREF color, BYTE baseAlpha, bool down, POINT point, UINT dpi, int logicalSize);
     bool Tick(ULONGLONG now);
     void Hide();
-    void ReapplyDisplayAffinity();
     bool IsActive() const { return active_; }
 
 private:
@@ -62,7 +61,6 @@ public:
     void Destroy();
     void Update(POINT point, UINT dpi, int logicalSize, COLORREF color, BYTE alpha);
     void Hide();
-    void ReapplyDisplayAffinity();
     bool IsVisible() const { return visible_; }
 
 private:
@@ -95,11 +93,8 @@ public:
     void UpdateHover(POINT point);
     void HideForScreenshot();
     void RestoreAfterScreenshot();
-    // Used by the "hide the dot while another app covers the screen" option.
-    void SetCaptureSuppressed(bool suppressed);
-    void ReapplyDisplayAffinity();
     void Tick();
-    bool IsHidden() const { return hidden_ || captureSuppressed_; }
+    bool IsHidden() const { return hidden_; }
 
 private:
     RippleWindow* AcquireRipple();
@@ -115,7 +110,6 @@ private:
     POINT hoverPoint_{};
     bool hoverDirty_ = false;
     bool hidden_ = false;
-    bool captureSuppressed_ = false;
     bool timerRunning_ = false;
     size_t nextRipple_ = 0;
 };

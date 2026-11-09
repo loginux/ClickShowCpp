@@ -21,7 +21,7 @@ std::wstring ColorToArgb(COLORREF color, BYTE alpha);
 UINT GetDpiForPoint(POINT point);
 void InvalidateDpiCache();
 UINT GetDpiForWindowSafe(HWND window);
-bool SetWindowDisplayAffinitySafe(HWND window);
+void SetWindowDisplayAffinitySafe(HWND window);
 std::wstring Utf8ToWide(const std::string& text);
 
 }
