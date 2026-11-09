@@ -42,6 +42,47 @@ ClickShow 的原生 C++ / Win32 重写版，并新增**鼠标点击计数**功�
 - 错误日志
 - Per-monitor DPI（覆盖层按目标显示器 DPI 计算物理尺寸）
 
+## 实现概要
+
+### 模块划分
+
+| 模块 | 职责 |
+|---|---|
+| `main.cpp` | 主对话框、托盘、定时器、生命周期、开机自启、更新检查 |
+| `input.cpp` | Raw Input（鼠标 5 键 + 键盘截图键），解析后回调给上层 |
+| `overlay.cpp` | 波纹/浮标两个分层窗口、GDI+ 绘制、16ms 合帧定时器 |
+| `settings.cpp` / `counts.cpp` | 与原版兼容的 JSON 读写、旧 INI 迁移与兜底 |
+| `json.cpp` | 最小 JSON 解析/转义，带嵌套深度上限 |
+| `util.cpp` | 路径、原子写、日志、DPI、ARGB、版本比较 |
+
+### 线程模型
+
+- **UI 线程**是唯一拥有窗口的线程：Raw Input 的 message-only 窗口、`WM_TIMER`、`WM_COMMAND` 都在这里分发，所以设置、计数、覆盖层状态全部单线程访问，**不需要加锁**。
+- **更新检查线程**启动后等 10 秒（可被取消事件提前唤醒）再发 WinHTTP 请求。结果放进互斥量保护的槽，`PostMessage` 只当信号用、不携带指针；退出时先 `SetEvent` 再 `join`，不会留游离线程在静态 CRT 拆卸期运行。
+- 覆盖层动画由挂在主窗口上的 **16ms 定时器**驱动：有待处理内容才启动，空闲即停；鼠标移动期间保持存活，避免每个输入包都创建/销毁定时器。
+
+### 配置加载与持久化
+
+加载结果分三种，只有一种会覆盖文件：
+
+| 结果 | 含义 | 行为 |
+|---|---|---|
+| `Ok` | 读到并解析成功 | 使用文件内容 |
+| `Unavailable` | 打不开/被占用/权限不足 | 内存里用默认值，**禁止任何写回**（含退出保存） |
+| `Corrupt` | 读到但不是合法 JSON | 用默认值、弹窗提示、立即保存 |
+
+兜底链路：JSON 写入失败 → 写 `*.ini` 并置 `[fallback] pending=1` → 下次启动优先读回 INI、迁回 JSON 后清除标记。否则旧 JSON 还在，兜底数据永远读不回来。
+
+### 渲染与 DPI
+
+- 覆盖层窗口 = `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST`，内容画在 32bpp DIB 上，用 `UpdateLayeredWindow` 呈现。
+- 波纹每帧重绘；浮标是静态图，只在尺寸/颜色/透明度变化时重绘，移动只更新分层窗口。
+- DPI 按光标所在显示器取，物理尺寸 = `MulDiv(逻辑尺寸, dpi, 96)`；结果按显示器缓存，`WM_DISPLAYCHANGE` / `WM_DPICHANGED` 时失效。
+
+### 版本
+
+`src/version.h` 是唯一真源，CMake 与 `build.cmd` 解析它生成 `app.rc` 和 `app.manifest`。这两处都要求 4 段版本号，脚本会自动补零（`1.51` → `1.51.0.0`）。
+
 ## 构建
 
 ### 要求
@@ -61,8 +102,8 @@ build.bat
 
 脚本会：
 
-1. 如果 PATH 里没有 `nmake`，通过 `vswhere` 找到 VS BuildTools 并调用 `vcvars64.bat`；
-2. 用 CMake + Ninja 配置 `build/`；
+1. 如果 PATH 里没有 `cl`，通过 `vswhere` 找到 VS BuildTools 并调用 `vcvars64.bat`；
+2. 用 CMake + Ninja 配置 `build/`（缓存里的路径失效时自动清空重配）；
 3. 编译输出 `build\ClickShow.exe`。
 
 ### 直接编译（不经过 CMake）
@@ -73,7 +114,7 @@ build.bat
 build.cmd
 ```
 
-输出 `build_direct\ClickShow.exe`。只依赖 Visual Studio Build Tools（`cl` + `rc` + Windows SDK），不需要 CMake/Ninja。脚本会自动查找 `vcvars64.bat`，并从 `res\app.rc.in` 生成资源脚本。
+输出 `build_direct\ClickShow.exe`。只依赖 Visual Studio Build Tools（`cl` + `rc` + Windows SDK），不需要 CMake/Ninja。脚本会自动查找 `vcvars64.bat`，并从 `res\app.rc.in` / `res\app.manifest` 生成资源脚本和清单（版本号取自 `src\version.h`）。
 
 ### 手动构建
 
@@ -127,9 +168,10 @@ build\ClickShow.exe
 |---|---|---|
 | 任意设置属性变化 | 100ms 防抖（ApplicationIdle）→ `SaveSettings()` → `ApplySettings()` | 100ms `WM_TIMER` → 保存设置 JSON → 应用覆盖层 |
 | 更新提示 | 先写入原始版本字符串 `LastNotifiedVersion` 并保存，再弹窗 | 相同；保存 `raw`（含 `|url`），弹窗前写入 |
-| 启动加载 | 文件有效不写；损坏时弹窗 + 默认值 + 立即保存 | 相同；`ConsumeLoadError()` 后弹窗并保存 |
+| 启动加载 | 文件有效不写；损坏时弹窗 + 默认值 + 立即保存 | 相同；只有真正损坏才弹窗并保存，读不到时用默认值但不写回 |
 | 关闭窗口/最小化 | 只隐藏，不保存 | 相同 |
 | 退出（托盘/按钮） | `OnClosed`：先保存设置，再停钩子，最后保存计数 | `WM_DESTROY`：同样的顺序 |
+| 注销/关机 | 无 | `WM_ENDSESSION`：立即保存设置与计数（系统可能不再发 `WM_DESTROY`） |
 | 点击计数 | 只在内存 `++`，不落盘 | 相同 |
 | 计数定时落盘 | 10 分钟 DispatcherTimer | 10 分钟 `WM_TIMER` |
 | 重置计数 | 确认后 Reset + Save | 相同 |
@@ -203,8 +245,8 @@ ClickShowCpp/
 
 - `CMake` + MSVC 19.51 + Ninja 构建通过，输出 `build\ClickShow.exe`。
 - `build.cmd` 仅用 `cl` + `rc` 直接编译通过，输出 `build_direct\ClickShow.exe`。
-- 3 秒启动冒烟测试通过：进程存活，未生成 `error.log`。
-- 配置兼容测试通过：读取原版真实配置，C++ 写出的 `ClickShow.setting` 与原版 **字节级一致**。
+- 3 秒启动冒烟测试通过（首版提交时验证；后续改动需在真机重跑）。
+- 配置兼容测试通过：读取原版真实配置可无损往返，同一份设置写出的内容字节稳定（与原版逐字节一致由首版提交时人工比对）。
 - 写盘频率测试通过：滑块拖动、复选框连点均只写 1 次；点击鼠标 0 次写盘。
 - 视觉与交互（波纹、浮标、托盘、计数、截图、多屏 DPI）需要在实际桌面上手动验收。
 
