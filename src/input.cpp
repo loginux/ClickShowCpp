@@ -154,16 +154,37 @@ LRESULT RawInput::HandleInput(LPARAM lParam) {
     } else if (input.header.dwType == RIM_TYPEKEYBOARD) {
         const RAWKEYBOARD& keyboard = input.data.keyboard;
         const bool keyDown = keyboard.Message == WM_KEYDOWN || keyboard.Message == WM_SYSKEYDOWN;
+        if (!keyDown) {
+            return 0;
+        }
 
-        if (keyDown && keyboard.VKey == VK_SNAPSHOT) {
+        const bool ctrlDown = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const bool altDown = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        const bool winDown = (GetKeyState(VK_LWIN) & 0x8000) != 0 ||
+                             (GetKeyState(VK_RWIN) & 0x8000) != 0;
+
+        if (keyboard.VKey == VK_SNAPSHOT || (winDown && shiftDown && keyboard.VKey == 'S')) {
             if (callbacks_.onPrintScreen) {
                 callbacks_.onPrintScreen();
             }
-        } else if (keyDown && keyboard.VKey == 'S') {
-            const bool winDown = (GetKeyState(VK_LWIN) & 0x8000) != 0 || (GetKeyState(VK_RWIN) & 0x8000) != 0;
-            const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (winDown && shiftDown && callbacks_.onPrintScreen) {
-                callbacks_.onPrintScreen();
+            return 0;
+        }
+
+        if (callbacks_.onCaptureShortcut != nullptr) {
+            // Third-party capture tools register their own global hotkeys, so
+            // there is no system notification for them. Matching the documented
+            // defaults lets the overlay start hiding at the key press instead of
+            // waiting for the tool's overlay window to appear.
+            const bool pixpin = ctrlDown && !altDown && !winDown && keyboard.VKey == '1';
+            const bool ctrlShiftDigit = ctrlDown && shiftDown && !altDown && !winDown &&
+                                        keyboard.VKey == '1';
+            const bool dingTalk = ctrlDown && shiftDown && !altDown && !winDown &&
+                                  keyboard.VKey == 'A';
+            const bool weChat = altDown && !ctrlDown && !winDown && keyboard.VKey == 'A';
+            const bool qq = ctrlDown && altDown && !winDown && keyboard.VKey == 'A';
+            if (pixpin || ctrlShiftDigit || dingTalk || weChat || qq) {
+                callbacks_.onCaptureShortcut();
             }
         }
     }
