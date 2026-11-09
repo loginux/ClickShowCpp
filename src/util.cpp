@@ -27,6 +27,12 @@ std::string WideToUtf8(const std::wstring& text) {
     return result;
 }
 
+// GetDpiForPoint is only called from the UI thread (raw input, WM_TIMER and
+// dialog messages all arrive there), so a lock-free one-entry cache is enough.
+// InvalidateDpiCache() is called on display and DPI changes.
+HMONITOR g_cachedDpiMonitor = nullptr;
+UINT g_cachedDpi = 0;
+
 std::wstring NowStamp() {
     SYSTEMTIME time{};
     GetLocalTime(&time);
@@ -124,7 +130,9 @@ bool WriteFileAtomicUtf8(const std::wstring& path, const std::wstring& text) {
     }
 
     const std::string bytes = WideToUtf8(text);
-    const std::wstring temp = path + L".tmp";
+    // Include the PID so two copies (e.g. the C# and C++ builds writing at the
+    // same time) cannot collide on the same temporary file.
+    const std::wstring temp = path + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
     HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
@@ -196,10 +204,10 @@ std::wstring Win32ErrorMessage(DWORD error) {
 
 void LogError(const wchar_t* source, const std::wstring& message) {
     const std::wstring line = L"[" + NowStamp() + L"] " + (source != nullptr ? source : L"?") + L"\r\n" + message + L"\r\n\r\n";
-    OutputDebugStringW(line.c_str());
 
     static std::mutex logMutex;
     std::lock_guard<std::mutex> lock(logMutex);
+    OutputDebugStringW(line.c_str());
 
     const std::wstring directory = GetLocalAppDataPath() + L"\\ClickShow";
     CreateDirectoryW(directory.c_str(), nullptr);
@@ -316,14 +324,28 @@ UINT GetDpiForPoint(POINT point) {
     }();
 
     HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+    if (monitor == g_cachedDpiMonitor && g_cachedDpi >= 48) {
+        return g_cachedDpi;
+    }
+
     UINT dpiX = 96;
     UINT dpiY = 96;
+    UINT dpi = 96;
     if (getDpiForMonitor != nullptr &&
         SUCCEEDED(getDpiForMonitor(monitor, 0 /* MDT_EFFECTIVE_DPI */, &dpiX, &dpiY)) &&
         dpiX >= 48) {
-        return dpiX;
+        dpi = dpiX;
+    } else {
+        dpi = GetDpiForWindowSafe(GetDesktopWindow());
     }
-    return GetDpiForWindowSafe(GetDesktopWindow());
+    g_cachedDpiMonitor = monitor;
+    g_cachedDpi = dpi >= 48 ? dpi : 96;
+    return g_cachedDpi;
+}
+
+void InvalidateDpiCache() {
+    g_cachedDpiMonitor = nullptr;
+    g_cachedDpi = 0;
 }
 
 UINT GetDpiForWindowSafe(HWND window) {
@@ -363,12 +385,14 @@ std::wstring Utf8ToWide(const std::string& text) {
     if (text.empty()) {
         return {};
     }
-    int length = MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), nullptr, 0);
+    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                                     static_cast<int>(text.size()), nullptr, 0);
     if (length <= 0) {
         return {};
     }
     std::wstring result(static_cast<size_t>(length), L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, text.data(), static_cast<int>(text.size()), result.data(), length);
+    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                        static_cast<int>(text.size()), result.data(), length);
     return result;
 }
 

@@ -29,7 +29,7 @@ if not exist "build_direct" mkdir "build_direct"
 
 pushd "build_direct"
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$root='%~dp0'; $s=[IO.File]::ReadAllText($root+'res\app.rc.in'); $icon=($root+'res\clickshow.ico').Replace('\','/'); $manifest=($root+'res\app.manifest').Replace('\','/'); $s=$s.Replace('@CLICKSHOW_ICON@',$icon).Replace('@CLICKSHOW_MANIFEST@',$manifest); [IO.File]::WriteAllText($root+'build_direct\app.rc', $s, (New-Object System.Text.UTF8Encoding($false)))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$root='%~dp0'; $enc=New-Object System.Text.UTF8Encoding($false); $ver=[regex]::Match([IO.File]::ReadAllText($root+'src\version.h'),'CLICKSHOW_VERSION_WSTRING\s+L.(\d+(?:\.\d+)+).').Groups[1].Value; if(-not $ver){Write-Error 'Cannot parse src/version.h'; exit 1}; $parts=@($ver.Split('.')); while($parts.Count -lt 4){$parts+='0'}; if($parts.Count -gt 4){$parts=$parts[0..3]}; $comma=($parts -join ','); $full=($parts -join '.'); $icon=($root+'res\clickshow.ico').Replace('\','/'); $manifest=($root+'build_direct\app.manifest').Replace('\','/'); $mf=[IO.File]::ReadAllText($root+'res\app.manifest').Replace('@CLICKSHOW_VERSION_FULL@',$full); [IO.File]::WriteAllText($root+'build_direct\app.manifest',$mf,$enc); $s=[IO.File]::ReadAllText($root+'res\app.rc.in').Replace('@CLICKSHOW_ICON@',$icon).Replace('@CLICKSHOW_MANIFEST@',$manifest).Replace('@CLICKSHOW_VERSION_COMMA@',$comma).Replace('@CLICKSHOW_VERSION_FULL@',$full); [IO.File]::WriteAllText($root+'build_direct\app.rc',$s,$enc)"
 if errorlevel 1 (
     echo Failed to generate app.rc from res\app.rc.in.
     popd
@@ -43,7 +43,7 @@ if errorlevel 1 (
 )
 
 cl /nologo /std:c++20 /EHsc /utf-8 /MT /O2 /W4 /permissive- ^
-    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 ^
+    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DNDEBUG /D_WIN32_WINNT=0x0A00 ^
     /I "..\src" /I "..\res" ^
     "..\src\main.cpp" "..\src\util.cpp" "..\src\json.cpp" "..\src\settings.cpp" "..\src\counts.cpp" "..\src\input.cpp" "..\src\overlay.cpp" ^
     app.res ^

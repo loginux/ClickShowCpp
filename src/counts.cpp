@@ -1,4 +1,5 @@
 #include "counts.h"
+#include "settings.h"   // kButtonCount, key tables, MouseButtonIndexFromKey
 #include "json.h"
 #include "util.h"
 
@@ -11,17 +12,23 @@
 namespace clickshow {
 namespace {
 
-const wchar_t* const kIniKeys[5] = {L"left", L"middle", L"right", L"x1", L"x2"};
+const wchar_t* const kIniKeys[kButtonCount] = {L"left", L"middle", L"right", L"x1", L"x2"};
+constexpr wchar_t kFallbackSection[] = L"fallback";
+constexpr wchar_t kFallbackKey[] = L"pending";
 
-int MouseButtonIndexFromKey(long long key) {
-    switch (key) {
-    case 1048576LL: return 0; // Left
-    case 4194304LL: return 1; // Middle
-    case 2097152LL: return 2; // Right
-    case 8388608LL: return 3; // XButton1
-    case 16777216LL: return 4; // XButton2
-    default: return -1;
+bool HasPendingLegacyFallback(const std::wstring& legacyPath) {
+    if (legacyPath.empty()) {
+        return false;
     }
+    std::error_code error;
+    if (!std::filesystem::exists(legacyPath, error)) {
+        return false;
+    }
+    return GetPrivateProfileIntW(kFallbackSection, kFallbackKey, 0, legacyPath.c_str()) != 0;
+}
+
+void ClearPendingLegacyFallback(const std::wstring& legacyPath) {
+    WritePrivateProfileStringW(kFallbackSection, kFallbackKey, L"0", legacyPath.c_str());
 }
 
 }
@@ -37,12 +44,35 @@ CountStore::CountStore(std::wstring path) : path_(std::move(path)) {
 
 void CountStore::Load() {
     counts_.fill(0);
+    loadFailed_ = false;
+
+    // A failed JSON save leaves a pending INI fallback. Recover it first,
+    // otherwise the fallback would never be read while a stale JSON exists.
+    if (HasPendingLegacyFallback(legacyPath_)) {
+        if (LoadIni() && SaveJson()) {
+            ClearPendingLegacyFallback(legacyPath_);
+        } else {
+            // Do not let the periodic save overwrite the real file with the
+            // zeros we failed to replace.
+            loadFailed_ = true;
+            LogError(L"Counts.LoadJson", L"读取 INI 兜底 " + legacyPath_ + L" 失败，本次不写回计数");
+        }
+        return;
+    }
 
     std::error_code error;
     const bool jsonExists = std::filesystem::exists(path_, error);
+    if (error) {
+        loadFailed_ = true;
+        LogError(L"Counts.LoadJson", L"无法检查 " + path_ + L"，本次不写回计数");
+        return;
+    }
     if (jsonExists) {
         if (!LoadJson()) {
-            LogError(L"Counts.LoadJson", L"解析 " + path_ + L" 失败，计数从 0 开始");
+            // Keep the file intact: an unreadable/corrupt counts file must not
+            // be silently overwritten by the next periodic save.
+            loadFailed_ = true;
+            LogError(L"Counts.LoadJson", L"读取或解析 " + path_ + L" 失败，本次不写回计数");
         }
         return;
     }
@@ -50,7 +80,11 @@ void CountStore::Load() {
     LoadIni();
 }
 
-bool CountStore::Save() const {
+bool CountStore::Save() {
+    if (loadFailed_) {
+        LogError(L"Counts.Save", L"启动时计数文件不可用，跳过写回以免覆盖原文件");
+        return false;
+    }
     if (SaveJson()) {
         return true;
     }
@@ -86,7 +120,7 @@ bool CountStore::LoadJson() {
         if (key == nullptr || value == nullptr) {
             continue;
         }
-        const int index = MouseButtonIndexFromKey(key->AsInt64(-1));
+        const int index = clickshow::MouseButtonIndexFromKey(key->AsInt64(-1));
         if (index >= 0) {
             counts_[index] = value->AsUInt64(0);
         }
@@ -96,16 +130,14 @@ bool CountStore::LoadJson() {
 
 bool CountStore::SaveJson() const {
     std::wstring out = L"{\"Counts\":[";
-    const int order[5] = {0, 2, 1, 3, 4}; // Left, Right, Middle, X1, X2 (original order)
-    const long long keys[5] = {1048576LL, 2097152LL, 4194304LL, 8388608LL, 16777216LL};
-    for (int index = 0; index < 5; ++index) {
+    for (int index = 0; index < kButtonCount; ++index) {
         if (index > 0) {
             out += L",";
         }
         out += L"{\"Key\":";
-        out += std::to_wstring(keys[index]);
+        out += std::to_wstring(kCountsSaveKeys[index]);
         out += L",\"Value\":";
-        out += std::to_wstring(counts_[order[index]]);
+        out += std::to_wstring(counts_[kCountsSaveOrder[index]]);
         out += L"}";
     }
     out += L"]}";
@@ -123,7 +155,7 @@ bool CountStore::LoadIni() {
         return false;
     }
 
-    for (int index = 0; index < 5; ++index) {
+    for (int index = 0; index < kButtonCount; ++index) {
         wchar_t buffer[64]{};
         GetPrivateProfileStringW(L"counts", kIniKeys[index], L"0", buffer, ARRAYSIZE(buffer),
                                  legacyPath_.c_str());
@@ -144,26 +176,32 @@ bool CountStore::SaveIni() const {
     }
 
     bool ok = true;
-    for (int index = 0; index < 5; ++index) {
+    for (int index = 0; index < kButtonCount; ++index) {
         ok = (WritePrivateProfileStringW(L"counts", kIniKeys[index],
                                          std::to_wstring(counts_[index]).c_str(),
                                          legacyPath_.c_str()) != FALSE) && ok;
+    }
+    if (ok) {
+        ok = WritePrivateProfileStringW(kFallbackSection, kFallbackKey, L"1",
+                                        legacyPath_.c_str()) != FALSE;
     }
     return ok;
 }
 
 void CountStore::Reset() {
     counts_.fill(0);
+    // An explicit reset is a user request: allow writing the file again.
+    loadFailed_ = false;
 }
 
 void CountStore::Add(int button) {
-    if (button >= 0 && button < 5) {
+    if (button >= 0 && button < kButtonCount) {
         ++counts_[button];
     }
 }
 
 uint64_t CountStore::Get(int button) const {
-    return (button >= 0 && button < 5) ? counts_[button] : 0;
+    return (button >= 0 && button < kButtonCount) ? counts_[button] : 0;
 }
 
 uint64_t CountStore::Total() const {

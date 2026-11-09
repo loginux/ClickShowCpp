@@ -19,6 +19,7 @@ bool ParseArgb(const std::wstring& text, COLORREF& color, BYTE& alpha);
 std::wstring ColorToHex(COLORREF color);
 std::wstring ColorToArgb(COLORREF color, BYTE alpha);
 UINT GetDpiForPoint(POINT point);
+void InvalidateDpiCache();
 UINT GetDpiForWindowSafe(HWND window);
 void SetWindowDisplayAffinitySafe(HWND window);
 std::wstring Utf8ToWide(const std::string& text);

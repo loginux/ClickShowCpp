@@ -12,6 +12,25 @@ namespace {
 constexpr wchar_t kRippleClassName[] = L"ClickShowRippleWindow";
 constexpr wchar_t kHoverClassName[] = L"ClickShowHoverWindow";
 
+// Both overlay windows are click-through, non-activating layered windows and
+// have exactly the same message handling.
+LRESULT CALLBACK LayeredWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DPICHANGED:
+        return 0;
+    case WM_DESTROY:
+        return 0;
+    default:
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+}
+
 }
 
 ATOM RippleWindow::classAtom_ = 0;
@@ -212,27 +231,7 @@ void RippleWindow::Hide() {
 }
 
 LRESULT CALLBACK RippleWindow::WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == WM_NCCREATE) {
-        auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
-        return TRUE;
-    }
-
-    switch (message) {
-    case WM_MOUSEACTIVATE:
-        return MA_NOACTIVATE;
-    case WM_NCHITTEST:
-        return HTTRANSPARENT;
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_DPICHANGED:
-        return 0;
-    case WM_DESTROY:
-        return 0;
-    default:
-        break;
-    }
-    return DefWindowProcW(window, message, wParam, lParam);
+    return LayeredWndProc(window, message, wParam, lParam);
 }
 
 HoverWindow::~HoverWindow() {
@@ -290,10 +289,13 @@ void HoverWindow::EnsureSurface(int pixelSize) {
     if (pixelSize <= 0) {
         return;
     }
-    if (pixelSize == pixelSize_ && bitmap_ != nullptr && graphics_ != nullptr && memoryDc_ != nullptr) {
+    if (pixelSize == pixelSize_ && !surfaceDirty_ && bitmap_ != nullptr &&
+        graphics_ != nullptr && memoryDc_ != nullptr) {
         return;
     }
 
+    // A freshly allocated DIB is empty; the circle has to be drawn again.
+    surfaceDirty_ = true;
     graphics_.reset();
     bitmap_.reset();
     if (memoryDc_ != nullptr) {
@@ -358,6 +360,7 @@ void HoverWindow::Render() {
     const REAL diameter = static_cast<REAL>(pixelSize_) - inset * 2.0f;
     graphics_->FillEllipse(&brush, inset, inset, diameter, diameter);
     graphics_->Flush(FlushIntentionSync);
+    surfaceDirty_ = false;
     UpdateLayered();
 }
 
@@ -378,17 +381,40 @@ void HoverWindow::Update(POINT point, UINT dpi, int logicalSize, COLORREF color,
         dpi = 96;
     }
     const int pixelSize = std::max(4, MulDiv(logicalSize, static_cast<int>(dpi), 96));
+    const bool styleChanged = (color != color_) || (alpha != alpha_);
     color_ = color;
     alpha_ = alpha;
     EnsureSurface(pixelSize);
 
     origin_.x = point.x - pixelSize / 2;
     origin_.y = point.y - pixelSize / 2;
-    SetWindowPos(window_, HWND_TOPMOST, origin_.x, origin_.y, pixelSize, pixelSize,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    SetWindowDisplayAffinitySafe(window_);
-    Render();
+
+    // Move the window explicitly instead of relying on UpdateLayeredWindow's
+    // pptDst to relocate it: the explicit call keeps the frame identical to the
+    // previous behaviour, and the cost is tiny next to the GDI+ redraw we just
+    // stopped doing. SWP_NOREDRAW is safe because UpdateLayeredWindow paints.
+    const bool wasVisible = visible_;
     visible_ = true;
+    UINT flags = SWP_NOACTIVATE | SWP_NOREDRAW;
+    HWND insertAfter = nullptr;
+    if (wasVisible) {
+        flags |= SWP_NOZORDER;
+    } else {
+        insertAfter = HWND_TOPMOST;
+        flags |= SWP_SHOWWINDOW;
+    }
+    SetWindowPos(window_, insertAfter, origin_.x, origin_.y, pixelSize, pixelSize, flags);
+    if (!wasVisible) {
+        SetWindowDisplayAffinitySafe(window_);
+    }
+
+    // The dot is a static image. Redraw it only when the surface, colour or
+    // alpha changed; moving the cursor only needs the layered window update.
+    if (surfaceDirty_ || styleChanged) {
+        Render();
+    } else {
+        UpdateLayered();
+    }
 }
 
 void HoverWindow::Hide() {
@@ -399,27 +425,7 @@ void HoverWindow::Hide() {
 }
 
 LRESULT CALLBACK HoverWindow::WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == WM_NCCREATE) {
-        auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
-        return TRUE;
-    }
-
-    switch (message) {
-    case WM_MOUSEACTIVATE:
-        return MA_NOACTIVATE;
-    case WM_NCHITTEST:
-        return HTTRANSPARENT;
-    case WM_ERASEBKGND:
-        return 1;
-    case WM_DPICHANGED:
-        return 0;
-    case WM_DESTROY:
-        return 0;
-    default:
-        break;
-    }
-    return DefWindowProcW(window, message, wParam, lParam);
+    return LayeredWndProc(window, message, wParam, lParam);
 }
 
 bool Overlay::Start(HINSTANCE instance, HWND notifyWindow, const Settings& settings) {
@@ -450,6 +456,9 @@ void Overlay::Stop() {
 
     hidden_ = false;
     hoverDirty_ = false;
+    // Drop the window handle so a queued timer callback cannot call SetTimer on
+    // a handle Windows may already have recycled.
+    notifyWindow_ = nullptr;
 }
 
 void Overlay::ApplySettings(const Settings& settings) {
@@ -538,6 +547,9 @@ void Overlay::Tick() {
 
     if (hoverDirty_) {
         UpdateHoverNow();
+        // Keep the timer alive while the pointer is moving. Killing it on the
+        // first idle frame would force SetTimer/KillTimer churn on every raw
+        // input packet; one continuous 16 ms timer is cheaper.
         anyActive = true;
     }
 

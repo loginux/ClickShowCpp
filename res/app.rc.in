@@ -1,5 +1,7 @@
 #pragma code_page(65001)
 
+// This is a template: CMake and build.cmd fill the @CLICKSHOW_*@ placeholders
+// from src/version.h before invoking rc.exe. Do not embed it directly.
 #include <windows.h>
 #include <commctrl.h>
 #include "resource.h"
@@ -62,8 +64,8 @@ BEGIN
 END
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,5,0,0
- PRODUCTVERSION 1,5,0,0
+ FILEVERSION @CLICKSHOW_VERSION_COMMA@
+ PRODUCTVERSION @CLICKSHOW_VERSION_COMMA@
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -80,11 +82,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "ClickShow"
             VALUE "FileDescription", "ClickShow C++"
-            VALUE "FileVersion", "1.5.0.0"
+            VALUE "FileVersion", "@CLICKSHOW_VERSION_FULL@"
             VALUE "InternalName", "ClickShow"
             VALUE "OriginalFilename", "ClickShow.exe"
             VALUE "ProductName", "ClickShow"
-            VALUE "ProductVersion", "1.5.0.0"
+            VALUE "ProductVersion", "@CLICKSHOW_VERSION_FULL@"
         END
     END
     BLOCK "VarFileInfo"

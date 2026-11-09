@@ -34,6 +34,8 @@ private:
     LRESULT HandleInput(LPARAM lParam);
 
     HWND window_ = nullptr;
+    POINT lastPosition_{};
+    bool hasPosition_ = false;
     InputCallbacks callbacks_;
     static ATOM classAtom_;
 };

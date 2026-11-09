@@ -12,9 +12,42 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/resource.h"
     COPYONLY)
 
-set(CLICKSHOW_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/clickshow.ico")
-set(CLICKSHOW_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/res/app.manifest")
+# src/version.h is the single source of truth for the version. Both the
+# version resource and the manifest are generated from it so a version bump
+# cannot leave the update check (kAppVersion) out of sync.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/src/version.h" _clicshow_version_line
+     REGEX "^#define CLICKSHOW_VERSION_WSTRING")
+string(REGEX MATCH "L\"([0-9]+(\\.[0-9]+)*)\"" _clicshow_version_match
+       "${_clicshow_version_line}")
+if(NOT _clicshow_version_match)
+    message(FATAL_ERROR "Cannot parse CLICKSHOW_VERSION_WSTRING from src/version.h")
+endif()
+set(CLICKSHOW_VERSION "${CMAKE_MATCH_1}")
 
+# VERSIONINFO and assemblyIdentity both require four numeric components, while
+# the display version may have any number of them (e.g. "1.51"). Pad or trim.
+string(REPLACE "." ";" _clicshow_version_parts "${CLICKSHOW_VERSION}")
+list(LENGTH _clicshow_version_parts _clicshow_version_count)
+if(_clicshow_version_count GREATER 4)
+    list(SUBLIST _clicshow_version_parts 0 4 _clicshow_version_parts)
+endif()
+while(TRUE)
+    list(LENGTH _clicshow_version_parts _clicshow_version_count)
+    if(_clicshow_version_count GREATER_EQUAL 4)
+        break()
+    endif()
+    list(APPEND _clicshow_version_parts "0")
+endwhile()
+list(JOIN _clicshow_version_parts "." CLICKSHOW_VERSION_FULL)
+list(JOIN _clicshow_version_parts "," CLICKSHOW_VERSION_COMMA)
+
+set(CLICKSHOW_ICON "${CMAKE_CURRENT_SOURCE_DIR}/res/clickshow.ico")
+set(CLICKSHOW_MANIFEST "${CMAKE_CURRENT_BINARY_DIR}/app.manifest")
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/res/app.manifest"
+    "${CLICKSHOW_MANIFEST}"
+    @ONLY)
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/res/app.rc.in"
     "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
@@ -61,6 +94,7 @@ set_target_properties(ClickShow PROPERTIES OUTPUT_NAME "ClickShow")
 
 option(CLICKSHOW_BUILD_TESTS "Build the configuration compatibility test" OFF)
 if(CLICKSHOW_BUILD_TESTS)
+    enable_testing()
     add_executable(ConfigTest
         tests/config_test.cpp
         src/util.cpp
@@ -83,4 +117,7 @@ if(CLICKSHOW_BUILD_TESTS)
         shell32
         advapi32
         ole32)
+    add_test(NAME ConfigTest COMMAND ConfigTest)
+    set_tests_properties(ConfigTest PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
 endif()

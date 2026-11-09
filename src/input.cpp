@@ -80,6 +80,9 @@ void RawInput::Stop() {
 
     DestroyWindow(window_);
     window_ = nullptr;
+    // Forget the cached cursor position so a restart re-notifies the overlay.
+    hasPosition_ = false;
+    lastPosition_ = POINT{};
 }
 
 LRESULT CALLBACK RawInput::WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -103,15 +106,23 @@ LRESULT CALLBACK RawInput::WndProc(HWND window, UINT message, WPARAM wParam, LPA
 LRESULT RawInput::HandleInput(LPARAM lParam) {
     RAWINPUT input{};
     UINT size = sizeof(input);
-    if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT, &input, &size,
-                        sizeof(RAWINPUTHEADER)) != size) {
+    // pcbSize is in/out: on success it holds the number of bytes copied (which
+    // is smaller than sizeof(RAWINPUT) for keyboard packets), so comparing the
+    // return value against it is meaningless. Check for the -1 error sentinel
+    // and a plausible payload length instead.
+    const UINT copied = GetRawInputData(reinterpret_cast<HRAWINPUT>(lParam), RID_INPUT,
+                                        &input, &size, sizeof(RAWINPUTHEADER));
+    if (copied == static_cast<UINT>(-1) || size < sizeof(RAWINPUTHEADER) ||
+        size > sizeof(input)) {
         return 0;
     }
 
     if (input.header.dwType == RIM_TYPEMOUSE) {
-        const RAWMOUSE& mouse = input.data.mouse;
         POINT point{};
-        GetCursorPos(&point);
+        if (!GetCursorPos(&point)) {
+            return 0;
+        }
+        const RAWMOUSE& mouse = input.data.mouse;
 
         auto deliver = [&](USHORT downFlag, USHORT upFlag, InputButton button) {
             if ((mouse.usButtonFlags & downFlag) != 0 && callbacks_.onButton) {
@@ -128,8 +139,17 @@ LRESULT RawInput::HandleInput(LPARAM lParam) {
         deliver(RI_MOUSE_BUTTON_4_DOWN, RI_MOUSE_BUTTON_4_UP, InputButton::X1);
         deliver(RI_MOUSE_BUTTON_5_DOWN, RI_MOUSE_BUTTON_5_UP, InputButton::X2);
 
-        if (callbacks_.onMove) {
-            callbacks_.onMove(point);
+        // Raw Input sends a packet for every button/wheel event too. Only
+        // notify the hover overlay when the cursor actually moved, otherwise a
+        // high-polling-rate mouse causes needless redraws and timer wakeups.
+        const bool positionChanged = !hasPosition_ ||
+            point.x != lastPosition_.x || point.y != lastPosition_.y;
+        if (positionChanged) {
+            lastPosition_ = point;
+            hasPosition_ = true;
+            if (callbacks_.onMove) {
+                callbacks_.onMove(point);
+            }
         }
     } else if (input.header.dwType == RIM_TYPEKEYBOARD) {
         const RAWKEYBOARD& keyboard = input.data.keyboard;

@@ -80,6 +80,7 @@ private:
     BYTE alpha_ = 0x60;
     POINT origin_{};
     bool visible_ = false;
+    bool surfaceDirty_ = true;
     static ATOM classAtom_;
 };
 

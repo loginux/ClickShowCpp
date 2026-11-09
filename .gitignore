@@ -1,2 +1,4 @@
 build/
 build_direct/
+# Local agent workspace data (notes, session state); not part of the project.
+.workbuddy-ai/

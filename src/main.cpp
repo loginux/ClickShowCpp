@@ -8,14 +8,18 @@
 #include <winhttp.h>
 #include <objbase.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cwchar>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "resource.h"
+#include "version.h"
 #include "settings.h"
 #include "counts.h"
 #include "input.h"
@@ -31,21 +35,34 @@ constexpr UINT_PTR kTimerScreenshot = 4;
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kUpdateMessage = WM_APP + 2;
 
-constexpr wchar_t kAppVersion[] = L"1.5.0";
+constexpr wchar_t kAppVersion[] = CLICKSHOW_VERSION_WSTRING;
 constexpr wchar_t kHomepageUrl[] = L"https://github.com/loginux/ClickShowCpp";
 constexpr wchar_t kReleasePageUrl[] = L"https://github.com/loginux/ClickShowCpp/releases";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"ClickShowCpp";
+
+// Control IDs indexed by clickshow::ButtonIndex. Keeping these tables next to
+// the button constants means adding a button only requires one edit per row.
+constexpr UINT kColorButtonIds[clickshow::kButtonCount] = {
+    IDC_BTN_COLOR_LEFT, IDC_BTN_COLOR_MIDDLE, IDC_BTN_COLOR_RIGHT,
+    IDC_BTN_COLOR_X1, IDC_BTN_COLOR_X2,
+};
+constexpr UINT kButtonCheckboxIds[clickshow::kButtonCount] = {
+    IDC_CHK_BTN_LEFT, IDC_CHK_BTN_MIDDLE, IDC_CHK_BTN_RIGHT,
+    IDC_CHK_BTN_X1, IDC_CHK_BTN_X2,
+};
+constexpr UINT kCountTextIds[clickshow::kButtonCount] = {
+    IDC_TXT_LEFT, IDC_TXT_MIDDLE, IDC_TXT_RIGHT, IDC_TXT_X1, IDC_TXT_X2,
+};
 
 HINSTANCE g_instance = nullptr;
 HWND g_mainWindow = nullptr;
 HMENU g_trayMenu = nullptr;
 NOTIFYICONDATAW g_trayIcon{};
 bool g_trayIconAdded = false;
-bool g_exiting = false;
+bool g_trayIconOwned = false;
+std::atomic<bool> g_exiting{false};
 UINT g_taskbarCreatedMessage = 0;
-ULONGLONG g_screenshotHideUntil = 0;
-bool g_screenshotHidden = false;
 ULONG_PTR g_gdiplusToken = 0;
 
 clickshow::Settings g_settings;
@@ -68,6 +85,14 @@ struct UpdateResult {
     std::wstring url;
 };
 
+// The update check runs on a worker thread. Its result is handed to the UI
+// thread through this mutex-protected slot instead of a raw pointer in the
+// message LPARAM, so a stale/reused HWND can never receive a dangling pointer.
+HANDLE g_updateCancelEvent = nullptr;
+std::thread g_updateThread;
+std::mutex g_updateMutex;
+std::unique_ptr<UpdateResult> g_updateResult;
+
 void SaveSettingsOnly();
 void SaveCountsOnly();
 void UpdateCountsUi();
@@ -83,6 +108,7 @@ bool SetAutoStart(bool enable);
 void AddTrayIcon();
 void RemoveTrayIcon();
 void StartUpdateCheck();
+void StopUpdateCheck();
 std::unique_ptr<UpdateResult> FetchUpdate();
 int ColorButtonIndex(UINT controlId);
 int CheckboxButtonIndex(UINT controlId);
@@ -103,18 +129,17 @@ void SaveCountsOnly() {
 }
 
 void UpdateCountsUi() {
-    if (g_mainWindow == nullptr) {
+    // The main window is hidden in the tray most of the time. Rewriting six
+    // static controls on every single click is wasted work; ShowMainWindow()
+    // refreshes the values whenever the window becomes visible again.
+    if (g_mainWindow == nullptr || !IsWindowVisible(g_mainWindow)) {
         return;
     }
-    auto setValue = [&](int controlId, uint64_t value) {
-        SetDlgItemTextW(g_mainWindow, controlId, std::to_wstring(value).c_str());
-    };
-    setValue(IDC_TXT_LEFT, g_counts.Get(clickshow::kLeft));
-    setValue(IDC_TXT_MIDDLE, g_counts.Get(clickshow::kMiddle));
-    setValue(IDC_TXT_RIGHT, g_counts.Get(clickshow::kRight));
-    setValue(IDC_TXT_X1, g_counts.Get(clickshow::kX1));
-    setValue(IDC_TXT_X2, g_counts.Get(clickshow::kX2));
-    setValue(IDC_TXT_TOTAL, g_counts.Total());
+    for (int index = 0; index < clickshow::kButtonCount; ++index) {
+        SetDlgItemTextW(g_mainWindow, kCountTextIds[index],
+                        std::to_wstring(g_counts.Get(index)).c_str());
+    }
+    SetDlgItemTextW(g_mainWindow, IDC_TXT_TOTAL, std::to_wstring(g_counts.Total()).c_str());
 }
 
 void ScheduleSave() {
@@ -149,24 +174,38 @@ void SetControlsFromSettings() {
     SetDlgItemTextW(g_mainWindow, IDC_TXT_SIZE, std::to_wstring(g_settings.indicatorSize).c_str());
     SetDlgItemTextW(g_mainWindow, IDC_TXT_HOVER, std::to_wstring(g_settings.hoverDotSize).c_str());
 
-    setCheck(IDC_CHK_BTN_LEFT, g_settings.buttons[clickshow::kLeft].enabled);
-    setCheck(IDC_CHK_BTN_MIDDLE, g_settings.buttons[clickshow::kMiddle].enabled);
-    setCheck(IDC_CHK_BTN_RIGHT, g_settings.buttons[clickshow::kRight].enabled);
-    setCheck(IDC_CHK_BTN_X1, g_settings.buttons[clickshow::kX1].enabled);
-    setCheck(IDC_CHK_BTN_X2, g_settings.buttons[clickshow::kX2].enabled);
-
-    const int colorButtons[] = {
-        IDC_BTN_COLOR_LEFT, IDC_BTN_COLOR_MIDDLE, IDC_BTN_COLOR_RIGHT,
-        IDC_BTN_COLOR_X1, IDC_BTN_COLOR_X2, IDC_BTN_COLOR_HOVER,
-    };
-    for (int controlId : colorButtons) {
-        InvalidateRect(GetDlgItem(g_mainWindow, controlId), nullptr, TRUE);
+    for (int index = 0; index < clickshow::kButtonCount; ++index) {
+        setCheck(kButtonCheckboxIds[index], g_settings.buttons[index].enabled);
+        InvalidateRect(GetDlgItem(g_mainWindow, kColorButtonIds[index]), nullptr, TRUE);
     }
+    InvalidateRect(GetDlgItem(g_mainWindow, IDC_BTN_COLOR_HOVER), nullptr, TRUE);
 
     UpdateCountsUi();
 }
 
+std::wstring NormalizeRunValue(std::wstring value) {
+    // Strip surrounding whitespace and the quotes we add around the path.
+    const size_t begin = value.find_first_not_of(L" \t");
+    if (begin == std::wstring::npos) {
+        return {};
+    }
+    const size_t end = value.find_last_not_of(L" \t");
+    value = value.substr(begin, end - begin + 1);
+    while (!value.empty() && value.back() == L'\0') {
+        value.pop_back();
+    }
+    if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"') {
+        value = value.substr(1, value.size() - 2);
+    }
+    return value;
+}
+
 bool IsAutoStartEnabled() {
+    const std::wstring executable = clickshow::GetExePath();
+    if (executable.empty()) {
+        return false;
+    }
+
     HKEY key = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
         return false;
@@ -177,7 +216,17 @@ bool IsAutoStartEnabled() {
     const LSTATUS status = RegQueryValueExW(key, kRunValue, nullptr, &type,
                                             reinterpret_cast<LPBYTE>(buffer), &size);
     RegCloseKey(key);
-    return status == ERROR_SUCCESS && type == REG_SZ;
+    if (status != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ) ||
+        size < sizeof(wchar_t) || size > sizeof(buffer)) {
+        return false;
+    }
+
+    // A stale value from an old install (or another app) must not show as
+    // "enabled": compare the actual command with this executable.
+    const std::wstring value = NormalizeRunValue(
+        std::wstring(buffer, size / sizeof(wchar_t)));
+    return !value.empty() &&
+           CompareStringOrdinal(value.c_str(), -1, executable.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 
 bool SetAutoStart(bool enable) {
@@ -193,9 +242,13 @@ bool SetAutoStart(bool enable) {
         if (executable.empty()) {
             ok = false;
         } else {
+            // Quote the path: the Run key splits unquoted command lines on
+            // spaces, which breaks installs under "Program Files" and allows
+            // a stray C:\Program.exe to be picked up instead.
+            const std::wstring command = L"\"" + executable + L"\"";
             ok = RegSetValueExW(key, kRunValue, 0, REG_SZ,
-                                reinterpret_cast<const BYTE*>(executable.c_str()),
-                                static_cast<DWORD>((executable.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+                                reinterpret_cast<const BYTE*>(command.c_str()),
+                                static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
         }
     } else {
         const LSTATUS status = RegDeleteValueW(key, kRunValue);
@@ -261,7 +314,11 @@ void OnInputButton(clickshow::InputButton button, bool down, POINT point) {
 
         const long long dx = static_cast<long long>(point.x) - state.point.x;
         const long long dy = static_cast<long long>(point.y) - state.point.y;
-        const bool movedFar = dx * dx + dy * dy > 200LL * 200LL;
+        // Screen coordinates are physical pixels; scale the 200 logical px
+        // threshold so the gesture feels the same on 150%/200% displays.
+        const long long threshold = 200LL *
+            static_cast<long long>(clickshow::GetDpiForPoint(point)) / 96LL;
+        const bool movedFar = dx * dx + dy * dy > threshold * threshold;
         const bool longPress = GetTickCount64() - state.tick > 500;
 
         if (g_settings.enableClickCircle && g_settings.buttons[index].enabled &&
@@ -282,11 +339,10 @@ void OnPrintScreen() {
     if (g_exiting) {
         return;
     }
-    g_screenshotHidden = true;
-    g_screenshotHideUntil = GetTickCount64() + 1000;
     g_overlay.HideForScreenshot();
     if (g_mainWindow != nullptr) {
-        SetTimer(g_mainWindow, kTimerScreenshot, 50, nullptr);
+        // One shot: no need to poll every 50 ms for a full second.
+        SetTimer(g_mainWindow, kTimerScreenshot, 1000, nullptr);
     }
 }
 
@@ -294,6 +350,13 @@ void AddTrayIcon() {
     if (g_mainWindow == nullptr || g_trayIconAdded) {
         return;
     }
+
+    // TaskbarCreated re-adds the icon; release the previously loaded one
+    // before resetting the NOTIFYICONDATA structure.
+    if (g_trayIcon.hIcon != nullptr && g_trayIconOwned) {
+        DestroyIcon(g_trayIcon.hIcon);
+    }
+    g_trayIconOwned = false;
 
     g_trayIcon = NOTIFYICONDATAW{};
     g_trayIcon.cbSize = sizeof(g_trayIcon);
@@ -305,7 +368,10 @@ void AddTrayIcon() {
     HICON icon = static_cast<HICON>(LoadImageW(
         g_instance, MAKEINTRESOURCEW(IDI_CLICKSHOW), IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
-    if (icon == nullptr) {
+    if (icon != nullptr) {
+        g_trayIconOwned = true;
+    } else {
+        // IDI_APPLICATION is a shared system icon; do not DestroyIcon it.
         icon = LoadIconW(nullptr, IDI_APPLICATION);
     }
     g_trayIcon.hIcon = icon;
@@ -330,6 +396,11 @@ void RemoveTrayIcon() {
         Shell_NotifyIconW(NIM_DELETE, &g_trayIcon);
         g_trayIconAdded = false;
     }
+    if (g_trayIcon.hIcon != nullptr && g_trayIconOwned) {
+        DestroyIcon(g_trayIcon.hIcon);
+        g_trayIconOwned = false;
+    }
+    g_trayIcon.hIcon = nullptr;
     if (g_trayMenu != nullptr) {
         DestroyMenu(g_trayMenu);
         g_trayMenu = nullptr;
@@ -337,27 +408,59 @@ void RemoveTrayIcon() {
 }
 
 void StartUpdateCheck() {
-    HWND window = g_mainWindow;
-    std::thread([window]() {
-        Sleep(10000);
-        auto result = FetchUpdate();
-        if (!result) {
+    const HWND window = g_mainWindow;
+    g_updateCancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_updateThread = std::thread([window]() {
+        // Wait on a cancellable event so shutdown can interrupt the 10 s delay
+        // and join the thread instead of leaving a detached thread running
+        // while the static CRT is being torn down.
+        if (g_updateCancelEvent != nullptr &&
+            WaitForSingleObject(g_updateCancelEvent, 10000) != WAIT_TIMEOUT) {
             return;
         }
-        auto* payload = new UpdateResult(std::move(*result));
-        if (!PostMessageW(window, kUpdateMessage, 0, reinterpret_cast<LPARAM>(payload))) {
-            delete payload;
+        if (g_exiting.load() || !IsWindow(window)) {
+            return;
         }
-    }).detach();
+
+        auto result = FetchUpdate();
+        if (!result || g_exiting.load() || !IsWindow(window)) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_updateMutex);
+            g_updateResult = std::move(result);
+        }
+        // The message carries no pointer; the UI thread picks up the result.
+        PostMessageW(window, kUpdateMessage, 0, 0);
+    });
+}
+
+void StopUpdateCheck() {
+    if (g_updateCancelEvent != nullptr) {
+        SetEvent(g_updateCancelEvent);
+    }
+    if (g_updateThread.joinable()) {
+        g_updateThread.join();
+    }
+    if (g_updateCancelEvent != nullptr) {
+        CloseHandle(g_updateCancelEvent);
+        g_updateCancelEvent = nullptr;
+    }
 }
 
 std::unique_ptr<UpdateResult> FetchUpdate() {
-    HINTERNET session = WinHttpOpen(L"ClickShowCpp/1.5", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+    HINTERNET session = WinHttpOpen(L"ClickShowCpp/" CLICKSHOW_VERSION_WSTRING,
+                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (session == nullptr) {
+    if (session == nullptr || g_exiting.load()) {
+        if (session != nullptr) {
+            WinHttpCloseHandle(session);
+        }
         return nullptr;
     }
-    WinHttpSetTimeouts(session, 5000, 5000, 5000, 5000);
+    // Keep these short: StopUpdateCheck() joins this thread on exit, so a hung
+    // server must not make quitting the app appear to freeze.
+    WinHttpSetTimeouts(session, 3000, 3000, 3000, 3000);
 
     HINTERNET connection = WinHttpConnect(session, L"helperservice.getquicker.cn",
                                           INTERNET_DEFAULT_HTTPS_PORT, 0);
@@ -393,13 +496,17 @@ std::unique_ptr<UpdateResult> FetchUpdate() {
                 if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
                     break;
                 }
-                std::string chunk(available, '\0');
+                // Cap each allocation as well as the total: a buggy or hostile
+                // server must not be able to claim a multi-gigabyte chunk.
+                const DWORD wanted = std::min<DWORD>(available, 8192);
+                std::string chunk(wanted, '\0');
                 DWORD read = 0;
-                if (!WinHttpReadData(request, chunk.data(), available, &read) || read == 0) {
+                if (!WinHttpReadData(request, chunk.data(), wanted, &read) || read == 0) {
                     break;
                 }
                 body.append(chunk.data(), read);
                 if (body.size() > 8192) {
+                    body.resize(8192);
                     break;
                 }
             }
@@ -431,26 +538,21 @@ std::unique_ptr<UpdateResult> FetchUpdate() {
     return result;
 }
 
-int ColorButtonIndex(UINT controlId) {
-    switch (controlId) {
-    case IDC_BTN_COLOR_LEFT: return clickshow::kLeft;
-    case IDC_BTN_COLOR_MIDDLE: return clickshow::kMiddle;
-    case IDC_BTN_COLOR_RIGHT: return clickshow::kRight;
-    case IDC_BTN_COLOR_X1: return clickshow::kX1;
-    case IDC_BTN_COLOR_X2: return clickshow::kX2;
-    default: return -1;
+int ButtonIndexFromControlId(UINT controlId, const UINT (&ids)[clickshow::kButtonCount]) {
+    for (int index = 0; index < clickshow::kButtonCount; ++index) {
+        if (ids[index] == controlId) {
+            return index;
+        }
     }
+    return -1;
+}
+
+int ColorButtonIndex(UINT controlId) {
+    return ButtonIndexFromControlId(controlId, kColorButtonIds);
 }
 
 int CheckboxButtonIndex(UINT controlId) {
-    switch (controlId) {
-    case IDC_CHK_BTN_LEFT: return clickshow::kLeft;
-    case IDC_CHK_BTN_MIDDLE: return clickshow::kMiddle;
-    case IDC_CHK_BTN_RIGHT: return clickshow::kRight;
-    case IDC_CHK_BTN_X1: return clickshow::kX1;
-    case IDC_CHK_BTN_X2: return clickshow::kX2;
-    default: return -1;
-    }
+    return ButtonIndexFromControlId(controlId, kButtonCheckboxIds);
 }
 
 bool IsLightColor(COLORREF color) {
@@ -532,7 +634,7 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
     switch (message) {
     case WM_INITDIALOG: {
         g_mainWindow = window;
-        SetWindowTextW(window, L"ClickShow 1.5.0 (C++)");
+        SetWindowTextW(window, L"ClickShow " CLICKSHOW_VERSION_WSTRING L" (C++)");
 
         HICON bigIcon = static_cast<HICON>(LoadImageW(
             g_instance, MAKEINTRESOURCEW(IDI_CLICKSHOW), IMAGE_ICON,
@@ -709,11 +811,8 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             SaveCountsOnly();
             return TRUE;
         case kTimerScreenshot:
-            if (GetTickCount64() >= g_screenshotHideUntil) {
-                g_screenshotHidden = false;
-                g_overlay.RestoreAfterScreenshot();
-                KillTimer(window, kTimerScreenshot);
-            }
+            g_overlay.RestoreAfterScreenshot();
+            KillTimer(window, kTimerScreenshot);
             return TRUE;
         default:
             break;
@@ -741,7 +840,11 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
     }
 
     case kUpdateMessage: {
-        std::unique_ptr<UpdateResult> result(reinterpret_cast<UpdateResult*>(lParam));
+        std::unique_ptr<UpdateResult> result;
+        {
+            std::lock_guard<std::mutex> lock(g_updateMutex);
+            result = std::move(g_updateResult);
+        }
         if (!result) {
             return TRUE;
         }
@@ -784,10 +887,22 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         }
         break;
 
+    case WM_DISPLAYCHANGE:
+    case WM_DPICHANGED:
+        clickshow::InvalidateDpiCache();
+        break;
+
     case WM_QUERYENDSESSION:
         return TRUE;
 
     case WM_ENDSESSION:
+        // Windows may terminate the process right after this message without
+        // ever sending WM_DESTROY. Counts are only flushed every 10 minutes,
+        // so persist everything we have in memory right now.
+        if (wParam != FALSE) {
+            SaveSettingsOnly();
+            SaveCountsOnly();
+        }
         return TRUE;
 
     case WM_DESTROY:
@@ -802,6 +917,9 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         g_overlay.Stop();
         SaveCountsOnly();
         RemoveTrayIcon();
+        // Stop touching this HWND from any later callback: Windows may recycle
+        // the handle value once the message loop finishes.
+        g_mainWindow = nullptr;
         PostQuitMessage(0);
         return TRUE;
 
@@ -825,7 +943,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return 0;
     }
 
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool comInitialized = SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED));
 
     INITCOMMONCONTROLSEX commonControls{};
     commonControls.dwSize = sizeof(commonControls);
@@ -835,7 +953,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     Gdiplus::GdiplusStartupInput gdiplusInput;
     if (Gdiplus::GdiplusStartup(&g_gdiplusToken, &gdiplusInput, nullptr) != Gdiplus::Ok) {
         MessageBoxW(nullptr, L"初始化 GDI+ 失败。", L"ClickShow", MB_OK | MB_ICONERROR);
-        CoUninitialize();
+        if (comInitialized) {
+            CoUninitialize();
+        }
         if (instanceMutex != nullptr) {
             CloseHandle(instanceMutex);
         }
@@ -854,7 +974,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (g_mainWindow == nullptr) {
         MessageBoxW(nullptr, L"创建主窗口失败。", L"ClickShow", MB_OK | MB_ICONERROR);
         Gdiplus::GdiplusShutdown(g_gdiplusToken);
-        CoUninitialize();
+        if (comInitialized) {
+            CoUninitialize();
+        }
         if (instanceMutex != nullptr) {
             CloseHandle(instanceMutex);
         }
@@ -890,6 +1012,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             break;
         }
         if (result == -1) {
+            // Message loop failed unexpectedly; WM_DESTROY may never run, so
+            // do not lose the in-memory settings and counts.
+            SaveSettingsOnly();
+            SaveCountsOnly();
             break;
         }
         if (!IsDialogMessageW(g_mainWindow, &message)) {
@@ -898,12 +1024,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
     }
 
+    StopUpdateCheck();
     g_rawInput.Stop();
     g_overlay.Stop();
     RemoveTrayIcon();
 
     Gdiplus::GdiplusShutdown(g_gdiplusToken);
-    CoUninitialize();
+    if (comInitialized) {
+        CoUninitialize();
+    }
     if (instanceMutex != nullptr) {
         CloseHandle(instanceMutex);
     }

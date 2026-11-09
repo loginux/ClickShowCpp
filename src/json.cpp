@@ -8,6 +8,31 @@
 namespace clickshow::json {
 namespace {
 
+// A corrupt or hostile config file must not be able to blow the stack through
+// deeply nested arrays/objects. Both files we parse are flat in practice.
+constexpr int kMaxDepth = 64;
+
+class DepthGuard {
+public:
+    explicit DepthGuard(int& depth) : depth_(depth), ok_(depth < kMaxDepth) {
+        if (ok_) {
+            ++depth;
+        }
+    }
+    ~DepthGuard() {
+        if (ok_) {
+            --depth_;
+        }
+    }
+    DepthGuard(const DepthGuard&) = delete;
+    DepthGuard& operator=(const DepthGuard&) = delete;
+    bool ok() const { return ok_; }
+
+private:
+    int& depth_;
+    bool ok_;
+};
+
 class Parser {
 public:
     explicit Parser(const std::wstring& text) : text_(text) {}
@@ -30,6 +55,7 @@ private:
 
     const std::wstring& text_;
     size_t position_ = 0;
+    int depth_ = 0;
 };
 
 bool Parser::Fail(const wchar_t* message) {
@@ -54,6 +80,11 @@ void Parser::SkipWhitespace() {
 }
 
 bool Parser::ParseValue(Value& out) {
+    DepthGuard guard(depth_);
+    if (!guard.ok()) {
+        return Fail(L"nesting too deep");
+    }
+
     SkipWhitespace();
     if (position_ >= text_.size()) {
         return Fail(L"unexpected end of input");

@@ -19,33 +19,29 @@ const wchar_t* const kButtonSections[kButtonCount] = {
     L"button.x2",
 };
 
-int MouseButtonIndexFromKey(long long key) {
-    switch (key) {
-    case 1048576LL: return kLeft;
-    case 4194304LL: return kMiddle;
-    case 2097152LL: return kRight;
-    case 8388608LL: return kX1;
-    case 16777216LL: return kX2;
-    default: return -1;
-    }
-}
+constexpr wchar_t kFallbackSection[] = L"fallback";
+constexpr wchar_t kFallbackKey[] = L"pending";
 
 void Normalize(Settings& settings) {
     settings.indicatorSize = std::clamp(settings.indicatorSize, 50, 400);
     settings.hoverDotSize = std::clamp(settings.hoverDotSize, 10, 150);
 }
 
+} // namespace
+
+int MouseButtonIndexFromKey(long long key) {
+    for (int index = 0; index < kButtonCount; ++index) {
+        if (kMouseButtonKeys[index] == key) {
+            return index;
+        }
+    }
+    return -1;
 }
 
 Settings Settings::Defaults() {
+    // All non-button defaults come from the member initializers in settings.h;
+    // only the per-button colours need to be supplied here.
     Settings settings;
-    settings.enableClickCircle = true;
-    settings.enableHoverDot = false;
-    settings.enableClickCount = false;
-    settings.indicatorSize = 150;
-    settings.hoverDotSize = 60;
-    settings.hoverDotColor = RGB(255, 255, 90);
-    settings.hoverDotAlpha = 0x60;
     settings.buttons[kLeft] = ButtonSetting{true, RGB(30, 144, 255), 0xFF};
     settings.buttons[kMiddle] = ButtonSetting{true, RGB(0, 128, 0), 0xFF};
     settings.buttons[kRight] = ButtonSetting{true, RGB(255, 69, 0), 0xFF};
@@ -65,17 +61,43 @@ SettingsStore::SettingsStore(std::wstring path) : path_(std::move(path)) {
 
 Settings SettingsStore::Load() {
     loadError_ = false;
+    writeBlocked_ = false;
     Settings settings = Settings::Defaults();
+
+    // If a previous run could not write the JSON file, it left an INI fallback
+    // with a "pending" marker. Recover from it and migrate back to JSON,
+    // otherwise the fallback would never be read (Load only looks at the INI
+    // when the JSON file is absent).
+    if (HasPendingLegacyFallback()) {
+        if (LoadIni(settings)) {
+            Normalize(settings);
+            if (SaveJson(settings)) {
+                ClearPendingLegacyFallback();
+            }
+            return settings;
+        }
+    }
 
     std::error_code error;
     const bool jsonExists = std::filesystem::exists(path_, error);
+    if (error) {
+        // We could not even stat the file (permissions, offline profile...).
+        // Treat it like an unreadable file: never write defaults over it.
+        writeBlocked_ = true;
+        Normalize(settings);
+        return settings;
+    }
     if (jsonExists) {
-        if (LoadJson(settings)) {
-            Normalize(settings);
-            return settings;
+        const LoadStatus status = LoadJson(settings);
+        if (status == LoadStatus::Corrupt) {
+            // The original app resets to defaults when ClickShow.setting is
+            // corrupt, and the caller then saves those defaults immediately.
+            loadError_ = true;
+        } else if (status == LoadStatus::Unavailable) {
+            // Locked/transient I/O error: keep using defaults in memory but
+            // never write them back, including on the normal exit save.
+            writeBlocked_ = true;
         }
-        // The original app resets to defaults when ClickShow.setting is corrupt.
-        loadError_ = true;
         Normalize(settings);
         return settings;
     }
@@ -90,7 +112,26 @@ Settings SettingsStore::Load() {
     return settings;
 }
 
-bool SettingsStore::Save(const Settings& settings) const {
+bool SettingsStore::HasPendingLegacyFallback() const {
+    if (legacyPath_.empty()) {
+        return false;
+    }
+    std::error_code error;
+    if (!std::filesystem::exists(legacyPath_, error)) {
+        return false;
+    }
+    return GetPrivateProfileIntW(kFallbackSection, kFallbackKey, 0, legacyPath_.c_str()) != 0;
+}
+
+void SettingsStore::ClearPendingLegacyFallback() const {
+    WritePrivateProfileStringW(kFallbackSection, kFallbackKey, L"0", legacyPath_.c_str());
+}
+
+bool SettingsStore::Save(const Settings& settings) {
+    if (writeBlocked_) {
+        LogError(L"Settings.Save", L"启动时配置文件不可读，跳过写入以免覆盖原文件");
+        return false;
+    }
     if (SaveJson(settings)) {
         return true;
     }
@@ -104,17 +145,18 @@ bool SettingsStore::ConsumeLoadError() {
     return result;
 }
 
-bool SettingsStore::LoadJson(Settings& settings) const {
+LoadStatus SettingsStore::LoadJson(Settings& settings) const {
     std::wstring text;
     if (!ReadFileUtf8(path_, text)) {
-        return false;
+        LogError(L"Settings.LoadJson", L"读取 " + path_ + L" 失败，本次不覆盖文件");
+        return LoadStatus::Unavailable;
     }
 
     std::wstring error;
     json::Value root = json::Parse(text, &error);
     if (!error.empty() || !root.IsObject()) {
         LogError(L"Settings.LoadJson", L"解析 " + path_ + L" 失败：" + error);
-        return false;
+        return LoadStatus::Corrupt;
     }
 
     if (const auto* value = root.Find(L"EnableClickCircle")) {
@@ -175,8 +217,7 @@ bool SettingsStore::LoadJson(Settings& settings) const {
         }
     }
 
-    Normalize(settings);
-    return true;
+    return LoadStatus::Ok;
 }
 
 bool SettingsStore::SaveJson(const Settings& settings) const {
@@ -205,15 +246,13 @@ bool SettingsStore::SaveJson(const Settings& settings) const {
     }
 
     out += L",\"MouseButtonSettings\":[";
-    const int order[kButtonCount] = {kLeft, kMiddle, kRight, kX1, kX2};
-    const long long keys[kButtonCount] = {1048576LL, 4194304LL, 2097152LL, 8388608LL, 16777216LL};
     for (int index = 0; index < kButtonCount; ++index) {
         if (index > 0) {
             out += L",";
         }
-        const ButtonSetting& button = settings.buttons[order[index]];
+        const ButtonSetting& button = settings.buttons[kSettingsButtonOrder[index]];
         out += L"{\"Key\":";
-        out += std::to_wstring(keys[index]);
+        out += std::to_wstring(kMouseButtonKeys[kSettingsButtonOrder[index]]);
         out += L",\"Value\":{\"Color\":\"";
         out += ColorToArgb(button.color, button.alpha);
         out += L"\",\"IsEnabled\":";
@@ -252,8 +291,16 @@ bool SettingsStore::LoadIni(Settings& settings) const {
     wchar_t buffer[256]{};
     GetPrivateProfileStringW(L"general", L"hoverDotColor", L"", buffer, ARRAYSIZE(buffer), legacyPath_.c_str());
     if (buffer[0] != L'\0') {
-        loaded.hoverDotColor = ParseColor(buffer, loaded.hoverDotColor);
+        // ParseArgb accepts both the old #RRGGBB form and the new #AARRGGBB one.
+        COLORREF color = loaded.hoverDotColor;
+        BYTE alpha = loaded.hoverDotAlpha;
+        if (ParseArgb(buffer, color, alpha)) {
+            loaded.hoverDotColor = color;
+        } else {
+            loaded.hoverDotColor = ParseColor(buffer, loaded.hoverDotColor);
+        }
     }
+    // Alpha has its own key, so a 6-digit legacy colour keeps the saved alpha.
     loaded.hoverDotAlpha = static_cast<BYTE>(std::clamp<int>(
         static_cast<int>(GetPrivateProfileIntW(L"general", L"hoverDotAlpha", 0x60, legacyPath_.c_str())),
         0, 255));
@@ -269,9 +316,18 @@ bool SettingsStore::LoadIni(Settings& settings) const {
         GetPrivateProfileStringW(kButtonSections[index], L"color", L"", buffer, ARRAYSIZE(buffer),
                                  legacyPath_.c_str());
         if (buffer[0] != L'\0') {
-            loaded.buttons[index].color = ParseColor(buffer, loaded.buttons[index].color);
+            COLORREF color = loaded.buttons[index].color;
+            BYTE alpha = loaded.buttons[index].alpha;
+            if (ParseArgb(buffer, color, alpha)) {
+                loaded.buttons[index].color = color;
+            } else {
+                loaded.buttons[index].color = ParseColor(buffer, loaded.buttons[index].color);
+            }
         }
-        loaded.buttons[index].alpha = 0xFF;
+        loaded.buttons[index].alpha = static_cast<BYTE>(std::clamp<int>(
+            static_cast<int>(GetPrivateProfileIntW(kButtonSections[index], L"alpha", 0xFF,
+                                                   legacyPath_.c_str())),
+            0, 255));
     }
 
     settings = std::move(loaded);
@@ -303,15 +359,24 @@ bool SettingsStore::SaveIni(const Settings& settings) const {
     putInt(L"general", L"enableClickCount", settings.enableClickCount ? 1 : 0);
     putInt(L"general", L"indicatorSize", settings.indicatorSize);
     putInt(L"general", L"hoverDotSize", settings.hoverDotSize);
-    putString(L"general", L"hoverDotColor", ColorToHex(settings.hoverDotColor));
+    putString(L"general", L"hoverDotColor",
+              ColorToArgb(settings.hoverDotColor, settings.hoverDotAlpha));
     putInt(L"general", L"hoverDotAlpha", settings.hoverDotAlpha);
     putString(L"general", L"lastNotifiedVersion", settings.lastNotifiedVersion);
 
     for (int index = 0; index < kButtonCount; ++index) {
         putInt(kButtonSections[index], L"enabled", settings.buttons[index].enabled ? 1 : 0);
-        putString(kButtonSections[index], L"color", ColorToHex(settings.buttons[index].color));
+        putString(kButtonSections[index], L"color",
+                  ColorToArgb(settings.buttons[index].color, settings.buttons[index].alpha));
+        putInt(kButtonSections[index], L"alpha", settings.buttons[index].alpha);
     }
 
+    if (ok) {
+        // Marks the INI as a pending fallback so Load() knows to prefer it over
+        // a stale JSON file on the next start.
+        ok = WritePrivateProfileStringW(kFallbackSection, kFallbackKey, L"1",
+                                        legacyPath_.c_str()) != FALSE;
+    }
     return ok;
 }
 

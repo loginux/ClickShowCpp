@@ -115,7 +115,8 @@ build\ClickShow.exe
 | `%LOCALAPPDATA%\ClickShow\error.log` | 错误日志 | 超过 1MB 轮转 |
 
 - 按钮颜色和 `HoverDotFill` 都按 `#AARRGGBB` 读写，alpha 会保留。
-- `settings.ini` / `counts.ini` 只是第一版 C++ 的旧路径：原版 JSON 不存在时读取一次做迁移；JSON 写入失败时作为兜底写入。正常保存都写原版 JSON。
+- `settings.ini` / `counts.ini` 只是第一版 C++ 的旧路径：原版 JSON 不存在时读取一次做迁移；JSON 写入失败时作为兜底写入，并打上 `[fallback] pending=1` 标记，下次启动优先读回 INI、迁回 JSON 后清除标记（不会因旧 JSON 还在而丢失修改）。正常保存都写原版 JSON。
+- 配置文件"读得到但解析失败"和"根本读不到"是分开处理的：只有真正损坏才恢复默认值并立即保存；瞬时读取失败（文件被占用等）只在内存里用默认值，且不会写回覆盖原文件。
 - C# 版和 C++ 版可以互相读取配置，但**不要同时运行两个版本**：两边各自在内存里维护计数和设置，后保存的会覆盖先保存的。
 
 ## 配置写入时机（与原版对齐）
@@ -136,10 +137,11 @@ build\ClickShow.exe
 
 有意的差异（不影响兼容性）：
 
-- C++ 用临时文件 + 同名替换的原子写入，避免半截 JSON；不调用 `FlushFileBuffers`、不使用 `MOVEFILE_WRITE_THROUGH`，配置文件很小，按普通缓存写即可，不会每次保存都强制物理落盘。时机不变。
+- C++ 用带 PID 的临时文件 + 同名替换的原子写入，避免半截 JSON，也避免两个实例撞同一个临时文件；不调用 `FlushFileBuffers`、不使用 `MOVEFILE_WRITE_THROUGH`，配置文件很小，按普通缓存写即可，不会每次保存都强制物理落盘。时机不变。
 - C++ 在启动输入前加载计数，避免原版启动瞬间丢一次点击。
 - Win32 `ChooseColor` 只能改 RGB，不能编辑 alpha；C++ 会保留原文件里的 per-button/hover alpha（原版 ColorPicker 可编辑 alpha）。
-- JSON 写入失败时回退到旧 INI 兜底保存，原版只提示保存失败。
+- JSON 写入失败时回退到旧 INI 兜底保存（含 `#AARRGGBB` 颜色与独立 alpha 键），原版只提示保存失败。
+- 版本号只在 `src/version.h` 定义；CMake 和 `build.cmd` 都从这里生成版本资源与 manifest。
 
 写入频率实测（本机）：
 
@@ -166,6 +168,7 @@ build\ClickShow.exe
 - 目标为 Windows 10/11 x64。`WDA_EXCLUDEFROMCAPTURE` 需要 Windows 10 2004+；更老的系统只走 PrintScreen 隐藏回退。
 - 设置窗口没有做完整的 per-monitor 重排（移动到不同 DPI 显示器时不会按新 DPI 重新缩放控件）；覆盖层（波纹/浮标）是按 DPI 计算的。
 - `ReleaseElevated`/UIAccess 不在此版本中；默认以普通用户运行。
+- 版本号按点分段做**数值**比较：`1.51` 的次版本号是 51，因此它比 `1.6` 新。升到 1.51 之后的版本号必须 ≥ `1.52`，否则更新检查会认为比当前版本旧。
 - 未做代码签名，SmartScreen 可能提示。
 - 更新检查只打开浏览器，不自动下载安装。
 - Win32 颜色对话框不编辑 alpha；per-button/hover 的 alpha 会保留原值。
@@ -179,6 +182,7 @@ ClickShowCpp/
   build.bat     CMake + Ninja 增量构建
   build.cmd     仅用 MSVC 直接编译（不经过 CMake）
   src/
+    version.h      版本号唯一来源（CMake / build.cmd 从这里生成资源）
     main.cpp       窗口、托盘、设置、计数、更新、生命周期
     input.cpp      Raw Input
     overlay.cpp    波纹/浮标窗口与 GDI+ 渲染
@@ -187,7 +191,7 @@ ClickShowCpp/
     counts.cpp     原版 ClickShow.counts JSON（+ 旧 INI 迁移）
     util.cpp       路径、文件读写、日志、DPI、ARGB、版本比较
   tests/
-    config_test.cpp  配置兼容测试（读原版文件、写临时 JSON）
+    config_test.cpp  配置兼容测试（带断言，可跑 CTest；读原版文件、写临时 JSON）
   res/
     app.rc.in      对话框、图标、版本资源、manifest 引用
     app.manifest   PerMonitorV2 + comctl32 v6
@@ -208,7 +212,7 @@ ClickShowCpp/
 
 ```bat
 build.bat -DCLICKSHOW_BUILD_TESTS=ON
-build\ConfigTest.exe
+ctest --test-dir build --output-on-failure
 ```
 
-测试只读原版 `ClickShow.setting` / `ClickShow.counts`，并写临时文件 `build_direct\config_test\settings.json`，不会改动原配置。
+测试自带断言（设置/计数往返、原版 JSON 格式、alpha 保留、INI 兜底恢复、JSON 嵌套深度与代理对），失败会返回非零退出码。除打印外，它只读原版 `ClickShow.setting` / `ClickShow.counts`，临时文件写在 `build_direct\config_test\`，不会改动原配置。
