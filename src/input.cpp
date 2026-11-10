@@ -4,6 +4,16 @@
 #include <utility>
 
 namespace clickshow {
+namespace {
+
+// A gesture tool may swallow a physical click and replay it as a complete
+// synthetic down/up pair right after the button is released. Such a replay is
+// recognised by: (a) hDevice == nullptr (injected, not a real device) and
+// (b) arriving within this window after that button's last UP. 50 ms is well
+// above the measured 3..18 ms replay delay but far below human double-clicks.
+constexpr DWORD kSyntheticReplayWindowMs = 50;
+
+}  // namespace
 
 ATOM RawInput::classAtom_ = 0;
 
@@ -83,6 +93,10 @@ void RawInput::Stop() {
     // Forget the cached cursor position so a restart re-notifies the overlay.
     hasPosition_ = false;
     lastPosition_ = POINT{};
+    for (int i = 0; i < kButtonSlotCount; ++i) {
+        hasLastUp_[i] = false;
+        lastUpTick_[i] = 0;
+    }
 }
 
 LRESULT CALLBACK RawInput::WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -104,6 +118,11 @@ LRESULT CALLBACK RawInput::WndProc(HWND window, UINT message, WPARAM wParam, LPA
 }
 
 LRESULT RawInput::HandleInput(LPARAM lParam) {
+    // GetMessageTime() is only meaningful while a message is being dispatched;
+    // WndProc calls us directly for WM_INPUT, so this is the packet timestamp.
+    // Unlike GetTickCount64() it is not affected by queue backlog.
+    const LONG msgTime = GetMessageTime();
+
     RAWINPUT input{};
     UINT size = sizeof(input);
     // pcbSize is in/out: on success it holds the number of bytes copied (which
@@ -123,13 +142,27 @@ LRESULT RawInput::HandleInput(LPARAM lParam) {
             return 0;
         }
         const RAWMOUSE& mouse = input.data.mouse;
+        const bool synthetic = (input.header.hDevice == nullptr);
 
         auto deliver = [&](USHORT downFlag, USHORT upFlag, InputButton button) {
+            const int index = static_cast<int>(button);
             if ((mouse.usButtonFlags & downFlag) != 0 && callbacks_.onButton) {
-                callbacks_.onButton(button, true, point);
+                // Unsigned subtraction stays correct across the 32-bit
+                // GetMessageTime wrap-around (~49.7 days).
+                const DWORD gap = static_cast<DWORD>(msgTime) -
+                    static_cast<DWORD>(lastUpTick_[index]);
+                const bool replay = synthetic && hasLastUp_[index] &&
+                    gap < kSyntheticReplayWindowMs;
+                if (!replay) {
+                    callbacks_.onButton(button, true, point);
+                }
             }
-            if ((mouse.usButtonFlags & upFlag) != 0 && callbacks_.onButton) {
-                callbacks_.onButton(button, false, point);
+            if ((mouse.usButtonFlags & upFlag) != 0) {
+                lastUpTick_[index] = msgTime;
+                hasLastUp_[index] = true;
+                if (callbacks_.onButton) {
+                    callbacks_.onButton(button, false, point);
+                }
             }
         };
 

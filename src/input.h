@@ -36,6 +36,14 @@ private:
     HWND window_ = nullptr;
     POINT lastPosition_{};
     bool hasPosition_ = false;
+
+    // GetMessageTime() of the most recent UP for each button. Mouse-gesture
+    // tools can swallow a physical click and replay it as a complete synthetic
+    // down/up pair just after the release; these timestamps let us recognise it.
+    static constexpr int kButtonSlotCount = static_cast<int>(InputButton::X2) + 1;
+    LONG lastUpTick_[kButtonSlotCount]{};
+    bool hasLastUp_[kButtonSlotCount]{};
+
     InputCallbacks callbacks_;
     static ATOM classAtom_;
 };
