@@ -33,6 +33,17 @@ private:
     static LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleInput(LPARAM lParam);
 
+    // Feeds one raw mouse packet into the "is the mouse being taken over?"
+    // detector. Returns true while an external program (KVM / remote control)
+    // is driving the mouse, in which case the clicks belong to the remote
+    // machine and must not be counted locally.
+    bool TrackRemoteControl(POINT cursor, LONG dx, LONG dy, bool absolute);
+
+    // True when the raw movement pushes the cursor further outside the
+    // virtual desktop, i.e. the cursor is blocked by the screen edge rather
+    // than held in place by another program.
+    bool IsPushingOutwards(POINT cursor, LONG dx, LONG dy) const;
+
     HWND window_ = nullptr;
     POINT lastPosition_{};
     bool hasPosition_ = false;
@@ -43,6 +54,14 @@ private:
     static constexpr int kButtonSlotCount = static_cast<int>(InputButton::X2) + 1;
     LONG lastUpTick_[kButtonSlotCount]{};
     bool hasLastUp_[kButtonSlotCount]{};
+
+    // Remote-control detection state.
+    POINT parkedCursor_{};
+    LONG parkedTravelX_ = 0;
+    LONG parkedTravelY_ = 0;
+    ULONGLONG parkedSince_ = 0;
+    bool hasParkedCursor_ = false;
+    bool remoteControl_ = false;
 
     InputCallbacks callbacks_;
     static ATOM classAtom_;
