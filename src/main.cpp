@@ -655,6 +655,7 @@ struct HeatKey {
     BYTE vkey;
     int widthMilli; // width in 1/1000 key units, to express 1.25/1.75/2.25 etc.
     const wchar_t* label; // nullptr => derive from vkey
+    int rowSpan = 1; // numpad +/- keys occupy two physical rows
 };
 
 struct HeatRow {
@@ -719,6 +720,48 @@ constexpr HeatRow kHeatRows[] = {
     {kRowNav,      static_cast<int>(std::size(kRowNav))},
 };
 
+constexpr BYTE Nk(clickshow::PhysicalKey key) {
+    return static_cast<BYTE>(key);
+}
+
+// Numeric keypad cluster, aligned with rows 1..5 of the main block. The + and
+// Enter keys span two rows, matching a full-size keyboard.
+constexpr HeatKey kNumpadNumLock[] = {
+    {Nk(clickshow::PhysicalKey::NumLock), 1000, L"Num"},
+    {Nk(clickshow::PhysicalKey::NumpadDivide), 1000, L"/"},
+    {Nk(clickshow::PhysicalKey::NumpadMultiply), 1000, L"*"},
+    {Nk(clickshow::PhysicalKey::NumpadSubtract), 1000, L"-"},
+};
+constexpr HeatKey kNumpad7[] = {
+    {Nk(clickshow::PhysicalKey::Numpad7), 1000, L"7"},
+    {Nk(clickshow::PhysicalKey::Numpad8), 1000, L"8"},
+    {Nk(clickshow::PhysicalKey::Numpad9), 1000, L"9"},
+    {Nk(clickshow::PhysicalKey::NumpadAdd), 1000, L"+", 2},
+};
+constexpr HeatKey kNumpad4[] = {
+    {Nk(clickshow::PhysicalKey::Numpad4), 1000, L"4"},
+    {Nk(clickshow::PhysicalKey::Numpad5), 1000, L"5"},
+    {Nk(clickshow::PhysicalKey::Numpad6), 1000, L"6"},
+};
+constexpr HeatKey kNumpad1[] = {
+    {Nk(clickshow::PhysicalKey::Numpad1), 1000, L"1"},
+    {Nk(clickshow::PhysicalKey::Numpad2), 1000, L"2"},
+    {Nk(clickshow::PhysicalKey::Numpad3), 1000, L"3"},
+    {Nk(clickshow::PhysicalKey::NumpadEnter), 1000, L"Ent", 2},
+};
+constexpr HeatKey kNumpad0[] = {
+    {Nk(clickshow::PhysicalKey::Numpad0), 2000, L"0"},
+    {Nk(clickshow::PhysicalKey::NumpadDecimal), 1000, L"."},
+};
+
+constexpr HeatRow kNumpadRows[] = {
+    {kNumpadNumLock, static_cast<int>(std::size(kNumpadNumLock))},
+    {kNumpad7,       static_cast<int>(std::size(kNumpad7))},
+    {kNumpad4,       static_cast<int>(std::size(kNumpad4))},
+    {kNumpad1,       static_cast<int>(std::size(kNumpad1))},
+    {kNumpad0,       static_cast<int>(std::size(kNumpad0))},
+};
+
 std::wstring HeatKeyLabel(const HeatKey& key) {
     if (key.label != nullptr) {
         return key.label;
@@ -740,20 +783,62 @@ COLORREF HeatColor(double ratio) {
     return RGB(r, g, b);
 }
 
+constexpr int kHeatKeyGap = 3;
+constexpr int kHeatRowGap = 5;
+constexpr int kHeatRowCount = static_cast<int>(std::size(kHeatRows));
+constexpr double kHeatMainUnits = 16.0; // widest main row is 15 units + 1 gap
+constexpr double kHeatTotalUnits = 20.5; // main block + gap + 4-column numpad
+constexpr int kHeatNumpadFirstRow = 1;   // aligned with the number row
+
+void TrackHeatMax(uint64_t& maxCount, const HeatRow& row) {
+    for (int i = 0; i < row.count; ++i) {
+        maxCount = (std::max)(maxCount, g_keyCounts.Get(row.keys[i].vkey));
+    }
+}
+
+void DrawHeatKey(HDC dc, const HeatKey& key, int x, int y, int keyHeight,
+                 double unitWidth, uint64_t maxCount) {
+    const int width = static_cast<int>(unitWidth * key.widthMilli / 1000.0) - kHeatKeyGap;
+    const int height = keyHeight * key.rowSpan + kHeatRowGap * (key.rowSpan - 1);
+    const uint64_t count = g_keyCounts.Get(key.vkey);
+    const double ratio = maxCount > 0 ? static_cast<double>(count) / maxCount : 0.0;
+    RECT cell{x, y, x + width, y + height};
+
+    HBRUSH brush = CreateSolidBrush(HeatColor(ratio));
+    FillRect(dc, &cell, brush);
+    DeleteObject(brush);
+    FrameRect(dc, &cell, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+
+    SetTextColor(dc, RGB(30, 30, 30));
+    const std::wstring label = HeatKeyLabel(key);
+    RECT labelRect = cell;
+    labelRect.bottom = cell.top + height / 2;
+    DrawTextW(dc, label.c_str(), -1, &labelRect,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+
+    if (count > 0) {
+        const std::wstring text = std::to_wstring(count);
+        RECT countRect = cell;
+        countRect.top = cell.top + height / 2;
+        DrawTextW(dc, text.c_str(), -1, &countRect,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    }
+}
+
 void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
-    int maxCount = 0;
+    uint64_t maxCount = 0;
     for (const HeatRow& row : kHeatRows) {
-        for (int i = 0; i < row.count; ++i) {
-            maxCount = (std::max)(maxCount, static_cast<int>(g_keyCounts.Get(row.keys[i].vkey)));
-        }
+        TrackHeatMax(maxCount, row);
+    }
+    for (const HeatRow& row : kNumpadRows) {
+        TrackHeatMax(maxCount, row);
     }
 
-    const int rowCount = static_cast<int>(std::size(kHeatRows));
-    const int gap = 3;
-    const int rowGap = 5;
-    const int keyHeight = (area.bottom - area.top - (rowCount - 1) * rowGap) / rowCount;
-    const int totalUnits = 16; // widest row is 15 units; leave room for nav row
-    const double unitWidth = static_cast<double>(area.right - area.left) / totalUnits;
+    const int keyHeight =
+        (area.bottom - area.top - (kHeatRowCount - 1) * kHeatRowGap) / kHeatRowCount;
+    const double unitWidth =
+        static_cast<double>(area.right - area.left) / kHeatTotalUnits;
+    const int numpadX = area.left + static_cast<int>(kHeatMainUnits * unitWidth);
 
     HFONT font = CreateFontW(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
                              DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -761,37 +846,26 @@ void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
     HFONT oldFont = static_cast<HFONT>(SelectObject(dc, font));
     SetBkMode(dc, TRANSPARENT);
 
-    for (int r = 0; r < rowCount; ++r) {
+    for (int r = 0; r < kHeatRowCount; ++r) {
         const HeatRow& row = kHeatRows[r];
         int x = area.left;
-        const int y = area.top + r * (keyHeight + rowGap);
+        const int y = area.top + r * (keyHeight + kHeatRowGap);
         for (int i = 0; i < row.count; ++i) {
             const HeatKey& key = row.keys[i];
-            const int width = static_cast<int>(unitWidth * key.widthMilli / 1000.0) - gap;
-            const uint64_t count = g_keyCounts.Get(key.vkey);
-            const double ratio = maxCount > 0 ? static_cast<double>(count) / maxCount : 0.0;
-            RECT cell{x, y, x + width, y + keyHeight};
+            DrawHeatKey(dc, key, x, y, keyHeight, unitWidth, maxCount);
+            x += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+        }
+    }
 
-            HBRUSH brush = CreateSolidBrush(HeatColor(ratio));
-            FillRect(dc, &cell, brush);
-            DeleteObject(brush);
-            FrameRect(dc, &cell, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-
-            SetTextColor(dc, RGB(30, 30, 30));
-            const std::wstring label = HeatKeyLabel(key);
-            RECT labelRect = cell;
-            labelRect.bottom = cell.top + keyHeight / 2;
-            DrawTextW(dc, label.c_str(), -1, &labelRect,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
-
-            if (count > 0) {
-                const std::wstring text = std::to_wstring(count);
-                RECT countRect = cell;
-                countRect.top = cell.top + keyHeight / 2;
-                DrawTextW(dc, text.c_str(), -1, &countRect,
-                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
-            }
-            x += width + gap;
+    for (int r = 0; r < static_cast<int>(std::size(kNumpadRows)); ++r) {
+        const HeatRow& row = kNumpadRows[r];
+        int x = numpadX;
+        const int y = area.top +
+            (kHeatNumpadFirstRow + r) * (keyHeight + kHeatRowGap);
+        for (int i = 0; i < row.count; ++i) {
+            const HeatKey& key = row.keys[i];
+            DrawHeatKey(dc, key, x, y, keyHeight, unitWidth, maxCount);
+            x += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
         }
     }
 

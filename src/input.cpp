@@ -17,9 +17,61 @@ constexpr DWORD kSyntheticReplayWindowMs = 50;
 
 // Raw Input often reports modifier keys with their generic VK (VK_SHIFT etc.).
 // Resolve them to the physical left/right code using the scan code so the
-// heatmap can show each key separately. Already-specific codes pass through.
+// heatmap can show each key separately. Numeric keypad keys are resolved by
+// make code as well: with Num Lock off Windows reports navigation VKeys, which
+// would otherwise be indistinguishable from the main navigation cluster.
 BYTE PhysicalVirtualKey(USHORT vkey, USHORT makeCode, USHORT flags) {
     const bool extended = (flags & RI_KEY_E0) != 0;
+    // Pause uses make code 0x45 with RI_KEY_E1, the same byte as Num Lock.
+    // Do not mistake it for a numpad key.
+    const bool e1 = (flags & RI_KEY_E1) != 0;
+
+    if (extended) {
+        switch (makeCode) {
+        case 0x1C:
+            return static_cast<BYTE>(PhysicalKey::NumpadEnter);
+        case 0x35:
+            return static_cast<BYTE>(PhysicalKey::NumpadDivide);
+        default:
+            break;
+        }
+    } else if (!e1) {
+        switch (makeCode) {
+        case 0x45:
+            return static_cast<BYTE>(PhysicalKey::NumLock);
+        case 0x37:
+            return static_cast<BYTE>(PhysicalKey::NumpadMultiply);
+        case 0x4A:
+            return static_cast<BYTE>(PhysicalKey::NumpadSubtract);
+        case 0x47:
+            return static_cast<BYTE>(PhysicalKey::Numpad7);
+        case 0x48:
+            return static_cast<BYTE>(PhysicalKey::Numpad8);
+        case 0x49:
+            return static_cast<BYTE>(PhysicalKey::Numpad9);
+        case 0x4E:
+            return static_cast<BYTE>(PhysicalKey::NumpadAdd);
+        case 0x4B:
+            return static_cast<BYTE>(PhysicalKey::Numpad4);
+        case 0x4C:
+            return static_cast<BYTE>(PhysicalKey::Numpad5);
+        case 0x4D:
+            return static_cast<BYTE>(PhysicalKey::Numpad6);
+        case 0x4F:
+            return static_cast<BYTE>(PhysicalKey::Numpad1);
+        case 0x50:
+            return static_cast<BYTE>(PhysicalKey::Numpad2);
+        case 0x51:
+            return static_cast<BYTE>(PhysicalKey::Numpad3);
+        case 0x52:
+            return static_cast<BYTE>(PhysicalKey::Numpad0);
+        case 0x53:
+            return static_cast<BYTE>(PhysicalKey::NumpadDecimal);
+        default:
+            break;
+        }
+    }
+
     switch (vkey) {
     case VK_SHIFT:
         return makeCode == 0x36 ? VK_RSHIFT : VK_LSHIFT;
@@ -344,14 +396,18 @@ LRESULT RawInput::HandleInput(LPARAM lParam) {
         const bool keyUp = keyboard.Message == WM_KEYUP || keyboard.Message == WM_SYSKEYUP;
         const USHORT vkey = keyboard.VKey;
         if (vkey < 256 && callbacks_.onKey) {
+            // Track edges by the resolved physical code, not the reported VK:
+            // main Enter and numpad Enter (or left/right Shift) can share a VK
+            // but must not suppress each other's down edge.
+            const BYTE code = PhysicalVirtualKey(
+                vkey, keyboard.MakeCode, keyboard.Flags);
             if (keyDown) {
-                if (!keyDown_[vkey]) {
-                    keyDown_[vkey] = true;
-                    callbacks_.onKey(PhysicalVirtualKey(
-                        vkey, keyboard.MakeCode, keyboard.Flags));
+                if (!keyDown_[code]) {
+                    keyDown_[code] = true;
+                    callbacks_.onKey(code);
                 }
             } else if (keyUp) {
-                keyDown_[vkey] = false;
+                keyDown_[code] = false;
             }
         }
     }

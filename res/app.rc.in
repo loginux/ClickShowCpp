@@ -72,6 +72,7 @@ FONT 9, "Microsoft YaHei UI", 400, 0, 0x86
 BEGIN
     LTEXT "累计按键:", -1, 12, 10, 44, 12
     LTEXT "0", IDC_TXT_KEYTOTAL, 58, 10, 100, 12
+    LTEXT "数字键盘", -1, 660, 10, 70, 12
     PUSHBUTTON "重置键盘计数", IDC_BTN_RESET_KEYCOUNT, 700, 6, 80, 18
     PUSHBUTTON "关闭", IDCLOSE, 786, 6, 60, 18
 END

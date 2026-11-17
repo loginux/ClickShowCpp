@@ -12,6 +12,30 @@ enum class InputButton {
     X2 = 4
 };
 
+// Numeric keypad keys need stable IDs even when Num Lock is off: Windows then
+// reports VK_HOME/VK_END/VK_ARROW, which collide with the navigation cluster.
+// These values sit in the reserved VK range and are only used as storage keys;
+// they are never sent to Windows as virtual keys.
+enum class PhysicalKey : BYTE {
+    NumLock = 0xE0,
+    NumpadDivide = 0xE1,
+    NumpadMultiply = 0xE2,
+    NumpadSubtract = 0xE3,
+    Numpad7 = 0xE4,
+    Numpad8 = 0xE5,
+    Numpad9 = 0xE6,
+    NumpadAdd = 0xE7,
+    Numpad4 = 0xE8,
+    Numpad5 = 0xE9,
+    Numpad6 = 0xEA,
+    Numpad1 = 0xEB,
+    Numpad2 = 0xEC,
+    Numpad3 = 0xED,
+    NumpadEnter = 0xEE,
+    Numpad0 = 0xEF,
+    NumpadDecimal = 0xF0
+};
+
 struct InputCallbacks {
     std::function<void(InputButton, bool, POINT)> onButton;
     std::function<void(POINT)> onMove;

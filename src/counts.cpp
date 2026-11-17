@@ -1,4 +1,5 @@
 #include "counts.h"
+#include "input.h"      // PhysicalKey: numpad storage IDs
 #include "settings.h"   // kButtonCount, key tables, MouseButtonIndexFromKey
 #include "json.h"
 #include "util.h"
@@ -255,6 +256,39 @@ void KeyCountStore::Load() {
         if (vkey >= 0 && vkey < kVirtualKeyCount) {
             counts_[static_cast<size_t>(vkey)] = value->AsUInt64(0);
         }
+    }
+
+    // 1.54 stored numpad keys under their Windows VKs. Fold those counts into
+    // the physical-key IDs used from 1.55 so existing history stays visible.
+    // VK_RETURN is intentionally left alone: it cannot distinguish main Enter
+    // from numpad Enter.
+    struct NumpadMigration {
+        BYTE from;
+        BYTE to;
+    };
+    constexpr NumpadMigration migrations[] = {
+        {VK_NUMPAD0, static_cast<BYTE>(PhysicalKey::Numpad0)},
+        {VK_NUMPAD1, static_cast<BYTE>(PhysicalKey::Numpad1)},
+        {VK_NUMPAD2, static_cast<BYTE>(PhysicalKey::Numpad2)},
+        {VK_NUMPAD3, static_cast<BYTE>(PhysicalKey::Numpad3)},
+        {VK_NUMPAD4, static_cast<BYTE>(PhysicalKey::Numpad4)},
+        {VK_NUMPAD5, static_cast<BYTE>(PhysicalKey::Numpad5)},
+        {VK_NUMPAD6, static_cast<BYTE>(PhysicalKey::Numpad6)},
+        {VK_NUMPAD7, static_cast<BYTE>(PhysicalKey::Numpad7)},
+        {VK_NUMPAD8, static_cast<BYTE>(PhysicalKey::Numpad8)},
+        {VK_NUMPAD9, static_cast<BYTE>(PhysicalKey::Numpad9)},
+        {VK_MULTIPLY, static_cast<BYTE>(PhysicalKey::NumpadMultiply)},
+        {VK_ADD, static_cast<BYTE>(PhysicalKey::NumpadAdd)},
+        {VK_SUBTRACT, static_cast<BYTE>(PhysicalKey::NumpadSubtract)},
+        {VK_DECIMAL, static_cast<BYTE>(PhysicalKey::NumpadDecimal)},
+        {VK_DIVIDE, static_cast<BYTE>(PhysicalKey::NumpadDivide)},
+        {VK_NUMLOCK, static_cast<BYTE>(PhysicalKey::NumLock)},
+    };
+    for (const NumpadMigration& item : migrations) {
+        uint64_t& from = counts_[static_cast<size_t>(item.from)];
+        uint64_t& to = counts_[static_cast<size_t>(item.to)];
+        to += from;
+        from = 0;
     }
 }
 
