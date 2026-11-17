@@ -3,11 +3,13 @@
 
 #define IDD_MAIN                    101
 #define IDI_CLICKSHOW               102
+#define IDD_KEYBOARD_STATS          103
 
 #define IDC_CHK_CIRCLE              1001
 #define IDC_CHK_HOVER               1002
 #define IDC_CHK_COUNT               1003
 #define IDC_CHK_AUTOSTART           1004
+#define IDC_CHK_KEYCOUNT            1005
 
 #define IDC_SLIDER_SIZE             1010
 #define IDC_TXT_SIZE                1011
@@ -39,6 +41,9 @@
 #define IDC_BTN_HOME                1052
 #define IDC_BTN_EXIT                1053
 #define IDC_LBL_NEWVERSION          1054
+#define IDC_BTN_KEYSTATS            1055
+#define IDC_TXT_KEYTOTAL            1056
+#define IDC_BTN_RESET_KEYCOUNT      1057
 
 #define IDM_OPEN                    2001
 #define IDM_EXIT                    2002

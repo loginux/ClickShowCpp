@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cwchar>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -68,7 +70,9 @@ ULONG_PTR g_gdiplusToken = 0;
 clickshow::Settings g_settings;
 clickshow::SettingsStore g_settingsStore;
 clickshow::CountStore g_counts;
+clickshow::KeyCountStore g_keyCounts;
 clickshow::Overlay g_overlay;
+HWND g_keyStatsWindow = nullptr;
 clickshow::RawInput g_rawInput;
 
 struct ButtonState {
@@ -103,6 +107,8 @@ void ExitApplication();
 void OnInputButton(clickshow::InputButton button, bool down, POINT point);
 void OnInputMove(POINT point);
 void OnPrintScreen();
+void OnInputKey(BYTE vkey);
+void SaveCountsOnly();
 bool IsAutoStartEnabled();
 bool SetAutoStart(bool enable);
 void AddTrayIcon();
@@ -125,6 +131,9 @@ void SaveSettingsOnly() {
 void SaveCountsOnly() {
     if (!g_counts.Save()) {
         clickshow::LogError(L"SaveCounts", L"写入计数失败");
+    }
+    if (!g_keyCounts.Save()) {
+        clickshow::LogError(L"SaveKeyCounts", L"写入键盘计数失败");
     }
 }
 
@@ -161,6 +170,7 @@ void SetControlsFromSettings() {
     setCheck(IDC_CHK_CIRCLE, g_settings.enableClickCircle);
     setCheck(IDC_CHK_HOVER, g_settings.enableHoverDot);
     setCheck(IDC_CHK_COUNT, g_settings.enableClickCount);
+    setCheck(IDC_CHK_KEYCOUNT, g_settings.enableKeyboardCount);
     setCheck(IDC_CHK_AUTOSTART, IsAutoStartEnabled());
 
     auto setSlider = [&](int controlId, int value, int minimum, int maximum) {
@@ -343,6 +353,18 @@ void OnPrintScreen() {
     if (g_mainWindow != nullptr) {
         // One shot: no need to poll every 50 ms for a full second.
         SetTimer(g_mainWindow, kTimerScreenshot, 1000, nullptr);
+    }
+}
+
+void OnInputKey(BYTE vkey) {
+    if (g_exiting || !g_settings.enableKeyboardCount) {
+        return;
+    }
+    g_keyCounts.Add(vkey);
+    // The dialog reads counts on each paint; a cheap invalidate keeps it live
+    // while open without polling on a timer.
+    if (g_keyStatsWindow != nullptr && IsWindowVisible(g_keyStatsWindow)) {
+        InvalidateRect(g_keyStatsWindow, nullptr, FALSE);
     }
 }
 
@@ -624,6 +646,236 @@ void ChooseColorForButton(UINT controlId) {
     ScheduleSave();
 }
 
+// --- Keyboard heatmap ----------------------------------------------------
+
+// One visible key: virtual key code plus width in "key units" (1.0 = a normal
+// letter key). Layout follows a 104-key ANSI board; rows are laid out left to
+// right in the order listed here.
+struct HeatKey {
+    BYTE vkey;
+    int widthMilli; // width in 1/1000 key units, to express 1.25/1.75/2.25 etc.
+    const wchar_t* label; // nullptr => derive from vkey
+};
+
+struct HeatRow {
+    const HeatKey* keys;
+    int count;
+};
+
+constexpr HeatKey kRowNumber[] = {
+    {VK_OEM_3, 1000, L"`"},  {'0', 1000, nullptr}, {'1', 1000, nullptr},
+    {'2', 1000, nullptr},    {'3', 1000, nullptr}, {'4', 1000, nullptr},
+    {'5', 1000, nullptr},    {'6', 1000, nullptr}, {'7', 1000, nullptr},
+    {'8', 1000, nullptr},    {'9', 1000, nullptr}, {VK_OEM_MINUS, 1000, L"-"},
+    {VK_OEM_PLUS, 1000, L"="}, {VK_BACK, 2000, L"Backspace"},
+};
+constexpr HeatKey kRowQ[] = {
+    {VK_TAB, 1500, L"Tab"},  {'Q', 1000, nullptr},  {'W', 1000, nullptr},
+    {'E', 1000, nullptr},    {'R', 1000, nullptr},  {'T', 1000, nullptr},
+    {'Y', 1000, nullptr},    {'U', 1000, nullptr},  {'I', 1000, nullptr},
+    {'O', 1000, nullptr},    {'P', 1000, nullptr},  {VK_OEM_4, 1000, L"["},
+    {VK_OEM_6, 1000, L"]"},  {VK_OEM_5, 1500, L"\\"},
+};
+constexpr HeatKey kRowA[] = {
+    {VK_CAPITAL, 1750, L"Caps"}, {'A', 1000, nullptr}, {'S', 1000, nullptr},
+    {'D', 1000, nullptr},        {'F', 1000, nullptr}, {'G', 1000, nullptr},
+    {'H', 1000, nullptr},        {'J', 1000, nullptr}, {'K', 1000, nullptr},
+    {'L', 1000, nullptr},        {VK_OEM_1, 1000, L";"}, {VK_OEM_7, 1000, L"'"},
+    {VK_RETURN, 2250, L"Enter"},
+};
+constexpr HeatKey kRowZ[] = {
+    {VK_LSHIFT, 2250, L"Shift"}, {'Z', 1000, nullptr}, {'X', 1000, nullptr},
+    {'C', 1000, nullptr},        {'V', 1000, nullptr}, {'B', 1000, nullptr},
+    {'N', 1000, nullptr},        {'M', 1000, nullptr}, {VK_OEM_COMMA, 1000, L","},
+    {VK_OEM_PERIOD, 1000, L"."}, {VK_OEM_2, 1000, L"/"}, {VK_RSHIFT, 2750, L"Shift"},
+};
+constexpr HeatKey kRowBottom[] = {
+    {VK_LCONTROL, 1250, L"Ctrl"}, {VK_LWIN, 1250, L"Win"}, {VK_LMENU, 1250, L"Alt"},
+    {VK_SPACE, 6250, L""},        {VK_RMENU, 1250, L"Alt"}, {VK_RWIN, 1250, L"Win"},
+    {VK_APPS, 1250, L"Menu"},     {VK_RCONTROL, 1250, L"Ctrl"},
+};
+constexpr HeatKey kRowFunction[] = {
+    {VK_ESCAPE, 1000, L"Esc"}, {VK_F1, 1000, L"F1"}, {VK_F2, 1000, L"F2"},
+    {VK_F3, 1000, L"F3"},      {VK_F4, 1000, L"F4"}, {VK_F5, 1000, L"F5"},
+    {VK_F6, 1000, L"F6"},      {VK_F7, 1000, L"F7"}, {VK_F8, 1000, L"F8"},
+    {VK_F9, 1000, L"F9"},      {VK_F10, 1000, L"F10"}, {VK_F11, 1000, L"F11"},
+    {VK_F12, 1000, L"F12"},
+};
+constexpr HeatKey kRowNav[] = {
+    {VK_SNAPSHOT, 1000, L"PrtSc"}, {VK_SCROLL, 1000, L"ScrLk"}, {VK_PAUSE, 1000, L"Pause"},
+    {VK_INSERT, 1000, L"Ins"},     {VK_HOME, 1000, L"Home"},    {VK_PRIOR, 1000, L"PgUp"},
+    {VK_DELETE, 1000, L"Del"},     {VK_END, 1000, L"End"},      {VK_NEXT, 1000, L"PgDn"},
+    {VK_UP, 1000, L"Up"},          {VK_LEFT, 1000, L"Left"},    {VK_DOWN, 1000, L"Down"},
+    {VK_RIGHT, 1000, L"Right"},
+};
+
+constexpr HeatRow kHeatRows[] = {
+    {kRowFunction, static_cast<int>(std::size(kRowFunction))},
+    {kRowNumber,   static_cast<int>(std::size(kRowNumber))},
+    {kRowQ,        static_cast<int>(std::size(kRowQ))},
+    {kRowA,        static_cast<int>(std::size(kRowA))},
+    {kRowZ,        static_cast<int>(std::size(kRowZ))},
+    {kRowBottom,   static_cast<int>(std::size(kRowBottom))},
+    {kRowNav,      static_cast<int>(std::size(kRowNav))},
+};
+
+std::wstring HeatKeyLabel(const HeatKey& key) {
+    if (key.label != nullptr) {
+        return key.label;
+    }
+    if (key.vkey >= '0' && key.vkey <= '9') {
+        return std::wstring(1, static_cast<wchar_t>(key.vkey));
+    }
+    return std::wstring(1, static_cast<wchar_t>(key.vkey));
+}
+
+// Gamma-compressed blue: ratio^(1/gamma) keeps the long tail visible instead
+// of letting the single hottest key saturate the whole scale.
+COLORREF HeatColor(double ratio) {
+    const double weight = std::pow(ratio, 0.5);
+    const int base = 246;
+    const int r = static_cast<int>(base + (30 - base) * weight);
+    const int g = static_cast<int>(base + (120 - base) * weight);
+    const int b = static_cast<int>(base + (220 - base) * weight);
+    return RGB(r, g, b);
+}
+
+void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
+    int maxCount = 0;
+    for (const HeatRow& row : kHeatRows) {
+        for (int i = 0; i < row.count; ++i) {
+            maxCount = (std::max)(maxCount, static_cast<int>(g_keyCounts.Get(row.keys[i].vkey)));
+        }
+    }
+
+    const int rowCount = static_cast<int>(std::size(kHeatRows));
+    const int gap = 3;
+    const int rowGap = 5;
+    const int keyHeight = (area.bottom - area.top - (rowCount - 1) * rowGap) / rowCount;
+    const int totalUnits = 16; // widest row is 15 units; leave room for nav row
+    const double unitWidth = static_cast<double>(area.right - area.left) / totalUnits;
+
+    HFONT font = CreateFontW(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+    HFONT oldFont = static_cast<HFONT>(SelectObject(dc, font));
+    SetBkMode(dc, TRANSPARENT);
+
+    for (int r = 0; r < rowCount; ++r) {
+        const HeatRow& row = kHeatRows[r];
+        int x = area.left;
+        const int y = area.top + r * (keyHeight + rowGap);
+        for (int i = 0; i < row.count; ++i) {
+            const HeatKey& key = row.keys[i];
+            const int width = static_cast<int>(unitWidth * key.widthMilli / 1000.0) - gap;
+            const uint64_t count = g_keyCounts.Get(key.vkey);
+            const double ratio = maxCount > 0 ? static_cast<double>(count) / maxCount : 0.0;
+            RECT cell{x, y, x + width, y + keyHeight};
+
+            HBRUSH brush = CreateSolidBrush(HeatColor(ratio));
+            FillRect(dc, &cell, brush);
+            DeleteObject(brush);
+            FrameRect(dc, &cell, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+
+            SetTextColor(dc, RGB(30, 30, 30));
+            const std::wstring label = HeatKeyLabel(key);
+            RECT labelRect = cell;
+            labelRect.bottom = cell.top + keyHeight / 2;
+            DrawTextW(dc, label.c_str(), -1, &labelRect,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+
+            if (count > 0) {
+                const std::wstring text = std::to_wstring(count);
+                RECT countRect = cell;
+                countRect.top = cell.top + keyHeight / 2;
+                DrawTextW(dc, text.c_str(), -1, &countRect,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+            }
+            x += width + gap;
+        }
+    }
+
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+}
+
+INT_PTR CALLBACK KeyboardStatsDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM) {
+    switch (message) {
+    case WM_INITDIALOG: {
+        g_keyStatsWindow = window;
+        SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
+                        std::to_wstring(g_keyCounts.Total()).c_str());
+        RECT rect{};
+        if (GetWindowRect(window, &rect)) {
+            const int w = rect.right - rect.left;
+            const int h = rect.bottom - rect.top;
+            const int sw = GetSystemMetrics(SM_CXSCREEN);
+            const int sh = GetSystemMetrics(SM_CYSCREEN);
+            SetWindowPos(window, nullptr, (sw - w) / 2, (sh - h) / 2, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return TRUE;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(window, &ps);
+        RECT client{};
+        GetClientRect(window, &client);
+        // Fill the whole client area minus a top margin for the header row;
+        // using the real client rect keeps the layout correct at any DPI.
+        RECT area{client.left + 12, client.top + 48,
+                  client.right - 12, client.bottom - 10};
+        DrawKeyboardHeatmap(dc, area);
+        SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
+                        std::to_wstring(g_keyCounts.Total()).c_str());
+        EndPaint(window, &ps);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_BTN_RESET_KEYCOUNT:
+            if (MessageBoxW(window, L"确定要重置所有键盘计数吗？", L"ClickShow",
+                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                g_keyCounts.Reset();
+                SaveCountsOnly();
+                SetDlgItemTextW(window, IDC_TXT_KEYTOTAL, L"0");
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return TRUE;
+        case IDCLOSE:
+        case IDCANCEL:
+            ShowWindow(window, SW_HIDE);
+            return TRUE;
+        default:
+            break;
+        }
+        break;
+    case WM_CLOSE:
+        ShowWindow(window, SW_HIDE);
+        return TRUE;
+    case WM_DESTROY:
+        g_keyStatsWindow = nullptr;
+        return TRUE;
+    default:
+        break;
+    }
+    return FALSE;
+}
+
+void ShowKeyboardStats() {
+    if (g_keyStatsWindow != nullptr && IsWindow(g_keyStatsWindow)) {
+        ShowWindow(g_keyStatsWindow, SW_SHOW);
+        SetForegroundWindow(g_keyStatsWindow);
+        InvalidateRect(g_keyStatsWindow, nullptr, FALSE);
+        return;
+    }
+    g_keyStatsWindow = CreateDialogParamW(g_instance, MAKEINTRESOURCEW(IDD_KEYBOARD_STATS),
+                                          nullptr, KeyboardStatsDlgProc, 0);
+    if (g_keyStatsWindow != nullptr) {
+        ShowWindow(g_keyStatsWindow, SW_SHOW);
+    }
+}
+
 INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     if (g_taskbarCreatedMessage != 0 && message == g_taskbarCreatedMessage) {
         g_trayIconAdded = false;
@@ -682,6 +934,15 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             ScheduleSave();
             return TRUE;
 
+        case IDC_CHK_KEYCOUNT:
+            g_settings.enableKeyboardCount = IsDlgButtonChecked(window, IDC_CHK_KEYCOUNT) == BST_CHECKED;
+            ScheduleSave();
+            return TRUE;
+
+        case IDC_BTN_KEYSTATS:
+            ShowKeyboardStats();
+            return TRUE;
+
         case IDC_CHK_AUTOSTART: {
             const bool enable = IsDlgButtonChecked(window, IDC_CHK_AUTOSTART) == BST_CHECKED;
             if (!SetAutoStart(enable)) {
@@ -703,6 +964,7 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
         case IDC_BTN_DEFAULT: {
             const clickshow::Settings defaults = clickshow::Settings::Defaults();
+            g_settings.enableKeyboardCount = defaults.enableKeyboardCount;
             g_settings.indicatorSize = defaults.indicatorSize;
             g_settings.hoverDotSize = defaults.hoverDotSize;
             g_settings.hoverDotColor = defaults.hoverDotColor;
@@ -913,6 +1175,10 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
         // Match OnClosed: settings first, then stop input, then counts and tray.
         SaveSettingsOnly();
+        if (g_keyStatsWindow != nullptr) {
+            DestroyWindow(g_keyStatsWindow);
+            g_keyStatsWindow = nullptr;
+        }
         g_rawInput.Stop();
         g_overlay.Stop();
         SaveCountsOnly();
@@ -969,6 +1235,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_settingsStore.Save(g_settings);
     }
     g_counts.Load();
+    g_keyCounts.Load();
 
     g_mainWindow = CreateDialogParamW(instance, MAKEINTRESOURCEW(IDD_MAIN), nullptr, MainDlgProc, 0);
     if (g_mainWindow == nullptr) {
@@ -994,6 +1261,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     callbacks.onButton = OnInputButton;
     callbacks.onMove = OnInputMove;
     callbacks.onPrintScreen = OnPrintScreen;
+    callbacks.onKey = OnInputKey;
     if (!g_rawInput.Start(instance, std::move(callbacks))) {
         clickshow::LogError(L"Startup.RawInput", L"全局输入初始化失败");
         MessageBoxW(nullptr, L"初始化全局鼠标输入失败，点击特效可能无法工作。", L"ClickShow",
@@ -1018,7 +1286,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             SaveCountsOnly();
             break;
         }
-        if (!IsDialogMessageW(g_mainWindow, &message)) {
+        const bool handledByStats = g_keyStatsWindow != nullptr &&
+            IsWindowVisible(g_keyStatsWindow) && IsDialogMessageW(g_keyStatsWindow, &message);
+        if (!handledByStats && !IsDialogMessageW(g_mainWindow, &message)) {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }

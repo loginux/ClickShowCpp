@@ -212,4 +212,102 @@ uint64_t CountStore::Total() const {
     return total;
 }
 
+// --- KeyCountStore -------------------------------------------------------
+
+KeyCountStore::KeyCountStore() {
+    path_ = GetLocalAppDataPath() + L"\\ClickShow\\ClickShow.keycounts";
+}
+
+KeyCountStore::KeyCountStore(std::wstring path) : path_(std::move(path)) {}
+
+void KeyCountStore::Load() {
+    counts_.fill(0);
+    loadFailed_ = false;
+
+    std::wstring text;
+    if (!ReadFileUtf8(path_, text)) {
+        return; // No file yet: start from zero, writing stays enabled.
+    }
+
+    std::wstring error;
+    json::Value root = json::Parse(text, &error);
+    if (!error.empty() || !root.IsObject()) {
+        loadFailed_ = true;
+        LogError(L"KeyCounts.Load", L"解析 " + path_ + L" 失败，本次不写回");
+        return;
+    }
+    const auto* keys = root.Find(L"Keys");
+    if (keys == nullptr || !keys->IsArray()) {
+        loadFailed_ = true;
+        LogError(L"KeyCounts.Load", L"缺少 Keys 数组，本次不写回");
+        return;
+    }
+    for (const auto& item : keys->array) {
+        if (item == nullptr || !item->IsObject()) {
+            continue;
+        }
+        const auto* key = item->Find(L"Key");
+        const auto* value = item->Find(L"Value");
+        if (key == nullptr || value == nullptr) {
+            continue;
+        }
+        const long long vkey = key->AsInt64(-1);
+        if (vkey >= 0 && vkey < kVirtualKeyCount) {
+            counts_[static_cast<size_t>(vkey)] = value->AsUInt64(0);
+        }
+    }
+}
+
+bool KeyCountStore::Save() {
+    if (loadFailed_) {
+        LogError(L"KeyCounts.Save", L"启动时键盘计数文件不可用，跳过写回");
+        return false;
+    }
+
+    std::wstring out = L"{\"Keys\":[";
+    bool first = true;
+    for (int vkey = 0; vkey < kVirtualKeyCount; ++vkey) {
+        if (counts_[static_cast<size_t>(vkey)] == 0) {
+            continue;
+        }
+        if (!first) {
+            out += L",";
+        }
+        first = false;
+        out += L"{\"Key\":";
+        out += std::to_wstring(vkey);
+        out += L",\"Value\":";
+        out += std::to_wstring(counts_[static_cast<size_t>(vkey)]);
+        out += L"}";
+    }
+    out += L"]}";
+
+    if (!WriteFileAtomicUtf8(path_, out)) {
+        LogError(L"KeyCounts.Save", L"写入 " + path_ + L" 失败");
+        return false;
+    }
+    return true;
+}
+
+void KeyCountStore::Reset() {
+    counts_.fill(0);
+    loadFailed_ = false;
+}
+
+void KeyCountStore::Add(uint8_t vkey) {
+    ++counts_[static_cast<size_t>(vkey)];
+}
+
+uint64_t KeyCountStore::Get(uint8_t vkey) const {
+    return counts_[static_cast<size_t>(vkey)];
+}
+
+uint64_t KeyCountStore::Total() const {
+    uint64_t total = 0;
+    for (uint64_t value : counts_) {
+        total += value;
+    }
+    return total;
+}
+
 }

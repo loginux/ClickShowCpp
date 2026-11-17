@@ -16,6 +16,8 @@ struct InputCallbacks {
     std::function<void(InputButton, bool, POINT)> onButton;
     std::function<void(POINT)> onMove;
     std::function<void()> onPrintScreen;
+    // Fired once on each key's down edge; auto-repeat is filtered out.
+    std::function<void(BYTE)> onKey;
 };
 
 class RawInput {
@@ -62,6 +64,11 @@ private:
     ULONGLONG parkedSince_ = 0;
     bool hasParkedCursor_ = false;
     bool remoteControl_ = false;
+
+    // Tracks which keys are physically down so WM_KEYDOWN auto-repeat (sent
+    // continuously while a key is held) only produces a single count. Reset on
+    // Stop() to avoid a stuck "down" flag if a WM_KEYUP is missed.
+    bool keyDown_[256]{};
 
     InputCallbacks callbacks_;
     static ATOM classAtom_;

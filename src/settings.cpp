@@ -165,6 +165,9 @@ LoadStatus SettingsStore::LoadJson(Settings& settings) const {
     if (const auto* value = root.Find(L"EnableClickCount")) {
         settings.enableClickCount = value->AsBool(settings.enableClickCount);
     }
+    if (const auto* value = root.Find(L"EnableKeyboardCount")) {
+        settings.enableKeyboardCount = value->AsBool(settings.enableKeyboardCount);
+    }
     if (const auto* value = root.Find(L"EnableHoverDot")) {
         settings.enableHoverDot = value->AsBool(settings.enableHoverDot);
     }
@@ -228,6 +231,8 @@ bool SettingsStore::SaveJson(const Settings& settings) const {
     out += settings.enableClickCircle ? L"true" : L"false";
     out += L",\"EnableClickCount\":";
     out += settings.enableClickCount ? L"true" : L"false";
+    out += L",\"EnableKeyboardCount\":";
+    out += settings.enableKeyboardCount ? L"true" : L"false";
     out += L",\"EnableHoverDot\":";
     out += settings.enableHoverDot ? L"true" : L"false";
     out += L",\"HoverDotFill\":\"";
@@ -281,6 +286,8 @@ bool SettingsStore::LoadIni(Settings& settings) const {
         GetPrivateProfileIntW(L"general", L"enableHoverDot", 0, legacyPath_.c_str()) != 0;
     loaded.enableClickCount =
         GetPrivateProfileIntW(L"general", L"enableClickCount", 0, legacyPath_.c_str()) != 0;
+    loaded.enableKeyboardCount =
+        GetPrivateProfileIntW(L"general", L"enableKeyboardCount", 0, legacyPath_.c_str()) != 0;
     loaded.indicatorSize = std::clamp<int>(
         static_cast<int>(GetPrivateProfileIntW(L"general", L"indicatorSize", 150, legacyPath_.c_str())),
         50, 400);
@@ -357,6 +364,7 @@ bool SettingsStore::SaveIni(const Settings& settings) const {
     putInt(L"general", L"enableClickCircle", settings.enableClickCircle ? 1 : 0);
     putInt(L"general", L"enableHoverDot", settings.enableHoverDot ? 1 : 0);
     putInt(L"general", L"enableClickCount", settings.enableClickCount ? 1 : 0);
+    putInt(L"general", L"enableKeyboardCount", settings.enableKeyboardCount ? 1 : 0);
     putInt(L"general", L"indicatorSize", settings.indicatorSize);
     putInt(L"general", L"hoverDotSize", settings.hoverDotSize);
     putString(L"general", L"hoverDotColor",

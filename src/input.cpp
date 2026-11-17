@@ -1,6 +1,7 @@
 #include "input.h"
 #include "util.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <utility>
 
@@ -13,6 +14,23 @@ namespace {
 // (b) arriving within this window after that button's last UP. 50 ms is well
 // above the measured 3..18 ms replay delay but far below human double-clicks.
 constexpr DWORD kSyntheticReplayWindowMs = 50;
+
+// Raw Input often reports modifier keys with their generic VK (VK_SHIFT etc.).
+// Resolve them to the physical left/right code using the scan code so the
+// heatmap can show each key separately. Already-specific codes pass through.
+BYTE PhysicalVirtualKey(USHORT vkey, USHORT makeCode, USHORT flags) {
+    const bool extended = (flags & RI_KEY_E0) != 0;
+    switch (vkey) {
+    case VK_SHIFT:
+        return makeCode == 0x36 ? VK_RSHIFT : VK_LSHIFT;
+    case VK_CONTROL:
+        return extended ? VK_RCONTROL : VK_LCONTROL;
+    case VK_MENU:
+        return extended ? VK_RMENU : VK_LMENU;
+    default:
+        return static_cast<BYTE>(vkey);
+    }
+}
 
 // Remote-control / KVM software takes the mouse over by parking the local
 // cursor at a fixed spot (the screen centre in the measured case), hiding it,
@@ -118,6 +136,7 @@ void RawInput::Stop() {
         hasLastUp_[i] = false;
         lastUpTick_[i] = 0;
     }
+    std::fill(std::begin(keyDown_), std::end(keyDown_), false);
     hasParkedCursor_ = false;
     parkedCursor_ = POINT{};
     parkedTravelX_ = 0;
@@ -315,6 +334,24 @@ LRESULT RawInput::HandleInput(LPARAM lParam) {
             const bool shiftDown = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             if (winDown && shiftDown && callbacks_.onPrintScreen) {
                 callbacks_.onPrintScreen();
+            }
+        }
+
+        // Count one event per physical press. Raw Input has no documented
+        // auto-repeat flag (RI_KEY_REPEAT is absent from the SDK headers), so
+        // track the down/up edge ourselves: while a key is held Windows keeps
+        // sending WM_KEYDOWN packets, but only the first one crosses the edge.
+        const bool keyUp = keyboard.Message == WM_KEYUP || keyboard.Message == WM_SYSKEYUP;
+        const USHORT vkey = keyboard.VKey;
+        if (vkey < 256 && callbacks_.onKey) {
+            if (keyDown) {
+                if (!keyDown_[vkey]) {
+                    keyDown_[vkey] = true;
+                    callbacks_.onKey(PhysicalVirtualKey(
+                        vkey, keyboard.MakeCode, keyboard.Flags));
+                }
+            } else if (keyUp) {
+                keyDown_[vkey] = false;
             }
         }
     }

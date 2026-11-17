@@ -47,6 +47,7 @@ struct Settings {
     bool enableClickCircle = true;
     bool enableHoverDot = false;
     bool enableClickCount = false;
+    bool enableKeyboardCount = false;
     int indicatorSize = 150;
     int hoverDotSize = 60;
     COLORREF hoverDotColor = RGB(255, 255, 90);
