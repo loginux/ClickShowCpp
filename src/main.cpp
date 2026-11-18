@@ -53,9 +53,6 @@ constexpr UINT kButtonCheckboxIds[clickshow::kButtonCount] = {
     IDC_CHK_BTN_LEFT, IDC_CHK_BTN_MIDDLE, IDC_CHK_BTN_RIGHT,
     IDC_CHK_BTN_X1, IDC_CHK_BTN_X2,
 };
-constexpr UINT kCountTextIds[clickshow::kButtonCount] = {
-    IDC_TXT_LEFT, IDC_TXT_MIDDLE, IDC_TXT_RIGHT, IDC_TXT_X1, IDC_TXT_X2,
-};
 
 HINSTANCE g_instance = nullptr;
 HWND g_mainWindow = nullptr;
@@ -72,7 +69,7 @@ clickshow::SettingsStore g_settingsStore;
 clickshow::CountStore g_counts;
 clickshow::KeyCountStore g_keyCounts;
 clickshow::Overlay g_overlay;
-HWND g_keyStatsWindow = nullptr;
+HWND g_countInfoWindow = nullptr;
 clickshow::RawInput g_rawInput;
 
 struct ButtonState {
@@ -138,17 +135,12 @@ void SaveCountsOnly() {
 }
 
 void UpdateCountsUi() {
-    // The main window is hidden in the tray most of the time. Rewriting six
-    // static controls on every single click is wasted work; ShowMainWindow()
-    // refreshes the values whenever the window becomes visible again.
-    if (g_mainWindow == nullptr || !IsWindowVisible(g_mainWindow)) {
-        return;
+    // Mouse counts are now drawn inside the count-info dialog (mouse-shaped
+    // panel), not in static controls on the main window. A cheap invalidate
+    // keeps the dialog live while open without a polling timer.
+    if (g_countInfoWindow != nullptr && IsWindowVisible(g_countInfoWindow)) {
+        InvalidateRect(g_countInfoWindow, nullptr, FALSE);
     }
-    for (int index = 0; index < clickshow::kButtonCount; ++index) {
-        SetDlgItemTextW(g_mainWindow, kCountTextIds[index],
-                        std::to_wstring(g_counts.Get(index)).c_str());
-    }
-    SetDlgItemTextW(g_mainWindow, IDC_TXT_TOTAL, std::to_wstring(g_counts.Total()).c_str());
 }
 
 void ScheduleSave() {
@@ -363,8 +355,8 @@ void OnInputKey(BYTE vkey) {
     g_keyCounts.Add(vkey);
     // The dialog reads counts on each paint; a cheap invalidate keeps it live
     // while open without polling on a timer.
-    if (g_keyStatsWindow != nullptr && IsWindowVisible(g_keyStatsWindow)) {
-        InvalidateRect(g_keyStatsWindow, nullptr, FALSE);
+    if (g_countInfoWindow != nullptr && IsWindowVisible(g_countInfoWindow)) {
+        InvalidateRect(g_countInfoWindow, nullptr, FALSE);
     }
 }
 
@@ -825,6 +817,91 @@ void DrawHeatKey(HDC dc, const HeatKey& key, int x, int y, int keyHeight,
     }
 }
 
+// Mouse-shaped count display. Regions use the same HeatColor scale as the
+// keyboard heatmap so the two panels of the count-info dialog look consistent.
+// Button order matches clickshow::ButtonIndex (Left, Middle, Right, X1, X2).
+void DrawMouseShape(HDC dc, const RECT& area) {
+    uint64_t maxCount = 0;
+    for (int i = 0; i < clickshow::kButtonCount; ++i) {
+        maxCount = (std::max)(maxCount, g_counts.Get(i));
+    }
+
+    // Authored against a 168x154 reference panel and scaled to the real area,
+    // so the mouse keeps its proportions at any DPI (fixed pixels left a tiny
+    // mouse with a lot of empty space on high-DPI screens).
+    constexpr double kRefWidth = 168.0;
+    constexpr double kRefHeight = 154.0;
+    const double scale = (std::max)(
+        1.0, (std::min)((area.right - area.left) / kRefWidth,
+                        (area.bottom - area.top) / kRefHeight));
+    auto box = [&](int x, int y, int w, int h) -> RECT {
+        return RECT{area.left + static_cast<int>(x * scale),
+                    area.top + static_cast<int>(y * scale),
+                    area.left + static_cast<int>((x + w) * scale),
+                    area.top + static_cast<int>((y + h) * scale)};
+    };
+
+    const int fontSize = (std::max)(11, static_cast<int>(12 * scale));
+    HFONT font = CreateFontW(-fontSize, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+    HFONT oldFont = static_cast<HFONT>(SelectObject(dc, font));
+    SetBkMode(dc, TRANSPARENT);
+
+    constexpr int kBodyX = 44;
+    constexpr int kTop = 10;
+    constexpr int kBodyWidth = 104;
+    constexpr int kBodyHeight = 126;
+
+    // Light rounded shell: the neutral end of the heat scale.
+    RECT shell = box(kBodyX, kTop, kBodyWidth, kBodyHeight);
+    HBRUSH shellBrush = CreateSolidBrush(HeatColor(0.0));
+    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, shellBrush));
+    RoundRect(dc, shell.left, shell.top, shell.right, shell.bottom,
+              static_cast<int>(26 * scale), static_cast<int>(26 * scale));
+    SelectObject(dc, oldBrush);
+    DeleteObject(shellBrush);
+
+    struct MouseRegion {
+        int button;
+        const wchar_t* label;
+        RECT rect;
+    };
+    const MouseRegion regions[] = {
+        {0, L"左键", box(kBodyX + 4,   kTop + 4,  46, 40)},
+        {2, L"右键", box(kBodyX + 54,  kTop + 4,  46, 40)},
+        {1, L"中键", box(kBodyX + 40,  kTop + 48, 24, 24)},
+        {3, L"侧1",  box(kBodyX - 20,  kTop + 52, 24, 24)},
+        {4, L"侧2",  box(kBodyX + 100, kTop + 52, 24, 24)},
+    };
+
+    for (const MouseRegion& region : regions) {
+        const uint64_t count = g_counts.Get(region.button);
+        const double ratio = maxCount > 0 ? static_cast<double>(count) / maxCount : 0.0;
+        HBRUSH brush = CreateSolidBrush(HeatColor(ratio));
+        FillRect(dc, &region.rect, brush);
+        DeleteObject(brush);
+        FrameRect(dc, &region.rect, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
+
+        SetTextColor(dc, RGB(30, 30, 30));
+        const int regionHeight = region.rect.bottom - region.rect.top;
+        RECT labelRect = region.rect;
+        labelRect.bottom = region.rect.top + regionHeight / 2;
+        DrawTextW(dc, region.label, -1, &labelRect,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+        if (count > 0) {
+            RECT countRect = region.rect;
+            countRect.top = region.rect.top + regionHeight / 2;
+            const std::wstring text = std::to_wstring(count);
+            DrawTextW(dc, text.c_str(), -1, &countRect,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+        }
+    }
+
+    SelectObject(dc, oldFont);
+    DeleteObject(font);
+}
+
 void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
     uint64_t maxCount = 0;
     for (const HeatRow& row : kHeatRows) {
@@ -873,10 +950,12 @@ void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
     DeleteObject(font);
 }
 
-INT_PTR CALLBACK KeyboardStatsDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM) {
+INT_PTR CALLBACK CountInfoDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM) {
     switch (message) {
     case WM_INITDIALOG: {
-        g_keyStatsWindow = window;
+        g_countInfoWindow = window;
+        SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL,
+                        std::to_wstring(g_counts.Total()).c_str());
         SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
                         std::to_wstring(g_keyCounts.Total()).c_str());
         RECT rect{};
@@ -888,7 +967,7 @@ INT_PTR CALLBACK KeyboardStatsDlgProc(HWND window, UINT message, WPARAM wParam, 
             SetWindowPos(window, nullptr, (sw - w) / 2, (sh - h) / 2, 0, 0,
                          SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        // Focus is assigned in ShowKeyboardStats() after the window is shown;
+        // Focus is assigned in ShowCountInfo() after the window is shown;
         // SetFocus() during WM_INITDIALOG has no effect on a hidden window.
         return TRUE;
     }
@@ -897,11 +976,20 @@ INT_PTR CALLBACK KeyboardStatsDlgProc(HWND window, UINT message, WPARAM wParam, 
         HDC dc = BeginPaint(window, &ps);
         RECT client{};
         GetClientRect(window, &client);
-        // Fill the whole client area minus a top margin for the header row;
-        // using the real client rect keeps the layout correct at any DPI.
-        RECT area{client.left + 12, client.top + 48,
-                  client.right - 12, client.bottom - 10};
-        DrawKeyboardHeatmap(dc, area);
+        // Left panel: mouse-shaped click counts. Right panel: keyboard heatmap.
+        // Splitting by client width keeps the layout correct at any DPI.
+        const int mouseRight =
+            client.left + static_cast<int>((client.right - client.left) * 0.18);
+        const int keyLeft =
+            client.left + static_cast<int>((client.right - client.left) * 0.19);
+        RECT mouseArea{client.left + 12, client.top + 48,
+                       mouseRight, client.bottom - 10};
+        RECT keyArea{keyLeft, client.top + 48,
+                     client.right - 12, client.bottom - 10};
+        DrawMouseShape(dc, mouseArea);
+        DrawKeyboardHeatmap(dc, keyArea);
+        SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL,
+                        std::to_wstring(g_counts.Total()).c_str());
         SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
                         std::to_wstring(g_keyCounts.Total()).c_str());
         EndPaint(window, &ps);
@@ -909,6 +997,15 @@ INT_PTR CALLBACK KeyboardStatsDlgProc(HWND window, UINT message, WPARAM wParam, 
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case IDC_BTN_RESET_MOUSECOUNT:
+            if (MessageBoxW(window, L"确定要重置所有鼠标点击计数吗？", L"ClickShow",
+                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                g_counts.Reset();
+                SaveCountsOnly();
+                SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL, L"0");
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return TRUE;
         case IDC_BTN_RESET_KEYCOUNT:
             if (MessageBoxW(window, L"确定要重置所有键盘计数吗？", L"ClickShow",
                             MB_YESNO | MB_ICONQUESTION) == IDYES) {
@@ -930,7 +1027,7 @@ INT_PTR CALLBACK KeyboardStatsDlgProc(HWND window, UINT message, WPARAM wParam, 
         ShowWindow(window, SW_HIDE);
         return TRUE;
     case WM_DESTROY:
-        g_keyStatsWindow = nullptr;
+        g_countInfoWindow = nullptr;
         return TRUE;
     default:
         break;
@@ -945,19 +1042,19 @@ void FocusStatsCloseButton(HWND window) {
     SetFocus(GetDlgItem(window, IDCLOSE));
 }
 
-void ShowKeyboardStats() {
-    if (g_keyStatsWindow != nullptr && IsWindow(g_keyStatsWindow)) {
-        ShowWindow(g_keyStatsWindow, SW_SHOW);
-        SetForegroundWindow(g_keyStatsWindow);
-        FocusStatsCloseButton(g_keyStatsWindow);
-        InvalidateRect(g_keyStatsWindow, nullptr, FALSE);
+void ShowCountInfo() {
+    if (g_countInfoWindow != nullptr && IsWindow(g_countInfoWindow)) {
+        ShowWindow(g_countInfoWindow, SW_SHOW);
+        SetForegroundWindow(g_countInfoWindow);
+        FocusStatsCloseButton(g_countInfoWindow);
+        InvalidateRect(g_countInfoWindow, nullptr, FALSE);
         return;
     }
-    g_keyStatsWindow = CreateDialogParamW(g_instance, MAKEINTRESOURCEW(IDD_KEYBOARD_STATS),
-                                          nullptr, KeyboardStatsDlgProc, 0);
-    if (g_keyStatsWindow != nullptr) {
-        ShowWindow(g_keyStatsWindow, SW_SHOW);
-        FocusStatsCloseButton(g_keyStatsWindow);
+    g_countInfoWindow = CreateDialogParamW(g_instance, MAKEINTRESOURCEW(IDD_COUNT_INFO),
+                                          nullptr, CountInfoDlgProc, 0);
+    if (g_countInfoWindow != nullptr) {
+        ShowWindow(g_countInfoWindow, SW_SHOW);
+        FocusStatsCloseButton(g_countInfoWindow);
     }
 }
 
@@ -1024,10 +1121,6 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             ScheduleSave();
             return TRUE;
 
-        case IDC_BTN_KEYSTATS:
-            ShowKeyboardStats();
-            return TRUE;
-
         case IDC_CHK_AUTOSTART: {
             const bool enable = IsDlgButtonChecked(window, IDC_CHK_AUTOSTART) == BST_CHECKED;
             if (!SetAutoStart(enable)) {
@@ -1038,13 +1131,8 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             return TRUE;
         }
 
-        case IDC_BTN_RESET_COUNT:
-            if (MessageBoxW(window, L"确定要重置所有点击计数吗？", L"ClickShow",
-                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                g_counts.Reset();
-                SaveCountsOnly();
-                UpdateCountsUi();
-            }
+        case IDC_BTN_COUNT_INFO:
+            ShowCountInfo();
             return TRUE;
 
         case IDC_BTN_DEFAULT: {
@@ -1260,9 +1348,9 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
         // Match OnClosed: settings first, then stop input, then counts and tray.
         SaveSettingsOnly();
-        if (g_keyStatsWindow != nullptr) {
-            DestroyWindow(g_keyStatsWindow);
-            g_keyStatsWindow = nullptr;
+        if (g_countInfoWindow != nullptr) {
+            DestroyWindow(g_countInfoWindow);
+            g_countInfoWindow = nullptr;
         }
         g_rawInput.Stop();
         g_overlay.Stop();
@@ -1371,8 +1459,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             SaveCountsOnly();
             break;
         }
-        const bool handledByStats = g_keyStatsWindow != nullptr &&
-            IsWindowVisible(g_keyStatsWindow) && IsDialogMessageW(g_keyStatsWindow, &message);
+        const bool handledByStats = g_countInfoWindow != nullptr &&
+            IsWindowVisible(g_countInfoWindow) && IsDialogMessageW(g_countInfoWindow, &message);
         if (!handledByStats && !IsDialogMessageW(g_mainWindow, &message)) {
             TranslateMessage(&message);
             DispatchMessageW(&message);

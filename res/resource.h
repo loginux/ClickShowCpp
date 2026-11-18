@@ -3,7 +3,7 @@
 
 #define IDD_MAIN                    101
 #define IDI_CLICKSHOW               102
-#define IDD_KEYBOARD_STATS          103
+#define IDD_COUNT_INFO              103
 
 #define IDC_CHK_CIRCLE              1001
 #define IDC_CHK_HOVER               1002
@@ -29,21 +29,15 @@
 #define IDC_CHK_BTN_X1              1033
 #define IDC_CHK_BTN_X2              1034
 
-#define IDC_TXT_LEFT                1040
-#define IDC_TXT_MIDDLE              1041
-#define IDC_TXT_RIGHT               1042
-#define IDC_TXT_X1                  1043
-#define IDC_TXT_X2                  1044
-#define IDC_TXT_TOTAL               1045
-
-#define IDC_BTN_RESET_COUNT         1050
+#define IDC_BTN_COUNT_INFO          1050
 #define IDC_BTN_DEFAULT             1051
 #define IDC_BTN_HOME                1052
 #define IDC_BTN_EXIT                1053
 #define IDC_LBL_NEWVERSION          1054
-#define IDC_BTN_KEYSTATS            1055
-#define IDC_TXT_KEYTOTAL            1056
-#define IDC_BTN_RESET_KEYCOUNT      1057
+#define IDC_BTN_RESET_MOUSECOUNT    1055
+#define IDC_TXT_MOUSETOTAL          1056
+#define IDC_TXT_KEYTOTAL            1057
+#define IDC_BTN_RESET_KEYCOUNT      1058
 
 #define IDM_OPEN                    2001
 #define IDM_EXIT                    2002
