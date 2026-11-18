@@ -133,6 +133,12 @@ bool SettingsStore::Save(const Settings& settings) {
         return false;
     }
     if (SaveJson(settings)) {
+        // JSON is healthy again. Clear a stale pending marker from an earlier
+        // INI fallback so the next launch reads this newer JSON, not the old INI
+        // snapshot. Guard with exists() to avoid creating a stray INI file.
+        if (HasPendingLegacyFallback()) {
+            ClearPendingLegacyFallback();
+        }
         return true;
     }
     LogError(L"Settings.Save", L"写入 " + path_ + L" 失败，回退到 settings.ini");

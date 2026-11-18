@@ -13,6 +13,68 @@
 
 ---
 
+## 代码审查发现（1.60 → 1.61 修复）
+
+对 `src/`、`res/`、`tests/` 与构建脚本做了一次全面审查。下列为**交叉验证确认**的问题，
+按严重级别排序；每条附触发条件与依据。带「取舍」标记的是设计决策，本次不改。
+用户确认：修复第 1~3 条（高/功能性缺陷），其余取舍项与低优先级项保留记录、本次不动。
+
+**高 — 数据丢失风险（✅ 已在 1.61 修复）**
+
+1. `KeyCountStore::Load()`（`counts.cpp:228-231`）：文件存在但读失败时直接 `return`，
+   不置 `loadFailed_`。对比 `CountStore::Load()`（`counts.cpp:64-79`）会检查 `exists()`
+   并在读失败时置位。后果：文件被占用/权限变更/超大时，10 分钟定时保存会用全 0
+   覆盖原文件，历史键盘计数永久丢失。
+2. `CountStore::Save()`（`counts.cpp:89-90`）与 `SettingsStore::Save()`（`settings.cpp:135-136`）：
+   INI 兜底置 `pending=1` 后，若后续 `SaveJson()` 成功，未清除该标记。下次启动
+   `Load()` 命中 pending，读回旧 INI 快照覆盖较新的 JSON，丢失两次保存之间的计数/设置。
+
+**中 — 功能性缺陷（✅ 已在 1.61 修复第 3 条）**
+
+3. `IDC_BTN_DEFAULT`（`main.cpp:1146-1161`）：重置"默认值"时漏掉
+   `enableClickCircle`、`enableHoverDot`、`enableClickCount` 三个开关，与
+   `Settings::Defaults()` 不一致；同时却重置了相邻的 `enableKeyboardCount`，行为矛盾。
+4. `Parser::ParseNumber()`（`json.cpp:252-283`）：只判断 `position_ != start` 即接受为
+   数字，未校验负号/小数点/指数后至少一位数字。`-`、`1.`、`1e` 会被当作合法数字，
+   使损坏配置绕过"解析错误→默认值+弹窗"的恢复路径，被静默改写。
+5. `settings.cpp:183,186`：`std::lround(value->AsDouble(...))` 未限制输入范围，
+   配置写入极大数时 `lround` 结果超出 `long` 范围为未定义行为（Windows 上 `long` 32 位）。
+6. 【取舍】合成回放过滤（`input.cpp:330-343`）对全部 5 键生效，而 1.52 的问题只针对
+   右键 WGestures 回放。合法注入的 ≤20Hz 连点可能被误过滤。是否收窄到右键需定口径。
+7. 【取舍】`keyDown_`（`input.cpp:404-411`）无运行期恢复：锁屏/UAC/热插拔导致丢失
+   `WM_KEYUP` 后，该键会卡住并漏掉下一次按下。需要决定在 `WM_KILLFOCUS`/`WM_ACTIVATEAPP`
+   时清空，还是维持现状。
+8. 【取舍】`KeyCountStore` 无 INI 兜底（与 `CountStore` 及 §6.2 描述不一致）：写失败
+   即丢本次会话键盘计数。是否补齐兜底链路需定口径。
+
+**低 — 资源/边界**
+
+9. 主窗口大/小图标（`main.cpp:1081-1092`）：`LoadImageW` 未用 `LR_SHARED`，且从未
+   `DestroyIcon`，每进程泄漏 2 个 USER 句柄（有界，退出回收）。
+10. 退出时 `StopUpdateCheck()`（`main.cpp:452-463`）：`SetEvent` 无法中断已在进行中的
+    WinHTTP 请求，四个独立 3 秒超时最坏累计约 12 秒，与"不卡退出"的意图不符。
+11. INI 计数解析（`counts.cpp:163`）：`_wcstoui64` 对畸形数值无校验，可写入 `ULLONG_MAX`。
+
+**已排除（误报）**：`Format()`（`util.cpp:160-169`）在 `_TRUNCATE` 下截断返回 `-1`，
+随后 `written < 0` 提前返回，不会用超长长度构造 `wstring`，无越界读。
+
+---
+
+## 1.61 — 修复代码审查发现的数据丢失风险
+
+### 改动
+
+1. `KeyCountStore::Load()`：读失败时用 `std::filesystem::exists()` 区分"文件不存在"（正常，从 0 开始）与"存在但读不到"（置 `loadFailed_`，阻止写回），与 `CountStore::Load()` 的保护策略一致。
+2. `CountStore::Save()` / `SettingsStore::Save()`：`SaveJson()` 成功后，若存在 `pending` 兜底标记则清除它，避免下次启动读回旧 INI 快照覆盖较新的 JSON；用 `exists()` 守卫，避免正常保存凭空创建 INI 文件。
+3. `IDC_BTN_DEFAULT`：补上 `enableClickCircle` / `enableHoverDot` / `enableClickCount` 三个开关的重置，与 `Settings::Defaults()` 一致。
+4. `tests/config_test.cpp`：新增 `TestPendingClearedOnHealthySave`、`TestKeyCountsUnreadableNotOverwritten`，覆盖上述两类数据丢失路径。
+
+### 验证
+
+`ConfigTest` 全绿；两套 exe 重建为 `1.61.0.0`。
+
+---
+
 ## 1.60 — 鼠标造型整体下移
 
 ### 需求

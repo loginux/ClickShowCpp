@@ -87,6 +87,13 @@ bool CountStore::Save() {
         return false;
     }
     if (SaveJson()) {
+        // JSON is healthy again. Clear a stale pending marker left by an
+        // earlier INI fallback so the next launch reads this newer JSON instead
+        // of restoring the old INI snapshot over it. Guard with exists() so a
+        // successful save does not create an otherwise-unused INI file.
+        if (HasPendingLegacyFallback(legacyPath_)) {
+            ClearPendingLegacyFallback(legacyPath_);
+        }
         return true;
     }
     LogError(L"Counts.SaveJson", L"写入 " + path_ + L" 失败，回退到 counts.ini");
@@ -227,7 +234,17 @@ void KeyCountStore::Load() {
 
     std::wstring text;
     if (!ReadFileUtf8(path_, text)) {
-        return; // No file yet: start from zero, writing stays enabled.
+        // Only a genuinely absent file means "no history yet". If the file
+        // exists but could not be read (locked, permissions, >16MB), keep the
+        // in-memory zeros but block writes so the periodic save cannot wipe the
+        // real file. This matches CountStore::Load()'s protect-the-file policy.
+        std::error_code error;
+        const bool exists = std::filesystem::exists(path_, error);
+        if (error || exists) {
+            loadFailed_ = true;
+            LogError(L"KeyCounts.Load", L"读取或检查 " + path_ + L" 失败，本次不写回");
+        }
+        return;
     }
 
     std::wstring error;

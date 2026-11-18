@@ -150,6 +150,66 @@ void TestPendingIniFallback(const std::wstring& dir) {
           L"the pending marker is cleared after recovery");
 }
 
+// A normal successful JSON save must clear a leftover fallback marker.
+// Otherwise the next launch would read the old INI snapshot back over the
+// newer JSON, silently losing everything saved since the fallback happened.
+// We plant the marker directly (as a prior failed JSON save would have) and
+// call Save() without Load(), so this isolates the Save-clears-marker path.
+void TestPendingClearedOnHealthySave(const std::wstring& dir) {
+    // --- SettingsStore ---
+    {
+        const std::wstring path = dir + L"\\healthy_settings.json";
+        const std::wstring ini = path + L".ini";
+        DeleteFileW(path.c_str());
+        DeleteFileW(ini.c_str());
+        // Simulate a prior fallback that left pending=1 in the INI.
+        CHECK(WritePrivateProfileStringW(L"fallback", L"pending", L"1", ini.c_str()) != FALSE,
+              L"planting a stale pending marker succeeds");
+
+        clickshow::SettingsStore store(path);
+        clickshow::Settings settings = clickshow::Settings::Defaults();
+        settings.indicatorSize = 222;
+        CHECK(store.Save(settings), L"saving settings succeeds");
+        CHECK(GetPrivateProfileIntW(L"fallback", L"pending", -1, ini.c_str()) == 0,
+              L"a healthy settings save clears the stale pending marker");
+    }
+
+    // --- CountStore ---
+    {
+        const std::wstring path = dir + L"\\healthy_counts.json";
+        const std::wstring ini = path + L".ini";
+        DeleteFileW(path.c_str());
+        DeleteFileW(ini.c_str());
+        CHECK(WritePrivateProfileStringW(L"fallback", L"pending", L"1", ini.c_str()) != FALSE,
+              L"planting a pending marker for counts succeeds");
+
+        clickshow::CountStore store(path);
+        store.Add(clickshow::kLeft);
+        CHECK(store.Save(), L"saving counts succeeds");
+        CHECK(GetPrivateProfileIntW(L"fallback", L"pending", -1, ini.c_str()) == 0,
+              L"a healthy counts save clears the stale pending marker");
+    }
+}
+
+// A keyboard-counts file that exists but cannot be read must not be treated as
+// "no history": the periodic save must be blocked so it cannot wipe the file.
+void TestKeyCountsUnreadableNotOverwritten(const std::wstring& dir) {
+    const std::wstring path = dir + L"\\blocked_keycounts";
+    // A directory at the file path cannot be opened as a file, simulating a
+    // locked/permission-denied keycounts file.
+    RemoveDirectoryW(path.c_str());
+    DeleteFileW(path.c_str());
+    CHECK(CreateDirectoryW(path.c_str(), nullptr) != FALSE,
+          L"creating the blocked keycounts path succeeds");
+
+    clickshow::KeyCountStore store(path);
+    store.Load();
+    store.Add(65);
+    CHECK(!store.Save(), L"saving is refused while the keycounts file is unreadable");
+
+    RemoveDirectoryW(path.c_str());
+}
+
 void TestCountsRoundtrip(const std::wstring& dir) {
     const std::wstring path = dir + L"\\counts.json";
     DeleteFileW((path + L".ini").c_str());
@@ -265,7 +325,9 @@ int wmain() {
     TestSettingsRoundtrip(dir);
     TestOriginalJsonCompatibility(dir);
     TestPendingIniFallback(dir);
+    TestPendingClearedOnHealthySave(dir);
     TestUnreadableFileIsNotOverwritten(dir);
+    TestKeyCountsUnreadableNotOverwritten(dir);
     TestCountsRoundtrip(dir);
     TestVersionComparison();
     TestJsonSafety();

@@ -1145,6 +1145,9 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
         case IDC_BTN_DEFAULT: {
             const clickshow::Settings defaults = clickshow::Settings::Defaults();
+            g_settings.enableClickCircle = defaults.enableClickCircle;
+            g_settings.enableHoverDot = defaults.enableHoverDot;
+            g_settings.enableClickCount = defaults.enableClickCount;
             g_settings.enableKeyboardCount = defaults.enableKeyboardCount;
             g_settings.indicatorSize = defaults.indicatorSize;
             g_settings.hoverDotSize = defaults.hoverDotSize;
