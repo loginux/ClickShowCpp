@@ -976,18 +976,19 @@ INT_PTR CALLBACK CountInfoDlgProc(HWND window, UINT message, WPARAM wParam, LPAR
         HDC dc = BeginPaint(window, &ps);
         RECT client{};
         GetClientRect(window, &client);
-        // Left panel: mouse-shaped click counts. Right panel: keyboard heatmap.
+        // Left panel: keyboard heatmap. Right panel: mouse-shaped click counts
+        // (matches a real desk, where the mouse sits to the right of the board).
         // Splitting by client width keeps the layout correct at any DPI.
-        const int mouseRight =
-            client.left + static_cast<int>((client.right - client.left) * 0.18);
-        const int keyLeft =
-            client.left + static_cast<int>((client.right - client.left) * 0.19);
-        RECT mouseArea{client.left + 12, client.top + 48,
-                       mouseRight, client.bottom - 10};
-        RECT keyArea{keyLeft, client.top + 48,
-                     client.right - 12, client.bottom - 10};
-        DrawMouseShape(dc, mouseArea);
+        const int keyRight =
+            client.left + static_cast<int>((client.right - client.left) * 0.81);
+        const int mouseLeft =
+            client.left + static_cast<int>((client.right - client.left) * 0.82);
+        RECT keyArea{client.left + 12, client.top + 48,
+                     keyRight, client.bottom - 10};
+        RECT mouseArea{mouseLeft, client.top + 48,
+                       client.right - 12, client.bottom - 10};
         DrawKeyboardHeatmap(dc, keyArea);
+        DrawMouseShape(dc, mouseArea);
         SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL,
                         std::to_wstring(g_counts.Total()).c_str());
         SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
