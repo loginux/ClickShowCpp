@@ -848,13 +848,13 @@ void DrawMouseShape(HDC dc, const RECT& area) {
     HFONT oldFont = static_cast<HFONT>(SelectObject(dc, font));
     SetBkMode(dc, TRANSPARENT);
 
-    constexpr int kBodyX = 44;
-    constexpr int kTop = 10;
-    constexpr int kBodyWidth = 104;
-    constexpr int kBodyHeight = 126;
+    constexpr int kBodyX = 46;
+    constexpr int kBodyY = 34;
+    constexpr int kBodyWidth = 118;
+    constexpr int kBodyHeight = 116;
 
     // Light rounded shell: the neutral end of the heat scale.
-    RECT shell = box(kBodyX, kTop, kBodyWidth, kBodyHeight);
+    RECT shell = box(kBodyX, kBodyY, kBodyWidth, kBodyHeight);
     HBRUSH shellBrush = CreateSolidBrush(HeatColor(0.0));
     HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, shellBrush));
     RoundRect(dc, shell.left, shell.top, shell.right, shell.bottom,
@@ -867,12 +867,16 @@ void DrawMouseShape(HDC dc, const RECT& area) {
         const wchar_t* label;
         RECT rect;
     };
+    // Layout follows the reference sketch: left/middle/right buttons in a row
+    // across the top edge, side 1 and side 2 stacked along the left edge, and
+    // the rounded body occupying the lower-right area. The button boxes ride
+    // slightly over the body edge, like the sketch.
     const MouseRegion regions[] = {
-        {0, L"左键", box(kBodyX + 4,   kTop + 4,  46, 40)},
-        {2, L"右键", box(kBodyX + 54,  kTop + 4,  46, 40)},
-        {1, L"中键", box(kBodyX + 40,  kTop + 48, 24, 24)},
-        {3, L"侧1",  box(kBodyX - 20,  kTop + 52, 24, 24)},
-        {4, L"侧2",  box(kBodyX + 100, kTop + 52, 24, 24)},
+        {0, L"左键", box(46,   4,  36, 34)},
+        {1, L"中键", box(86,   4,  32, 34)},
+        {2, L"右键", box(122,  4,  38, 34)},
+        {3, L"侧1",  box(6,   62,  44, 36)},
+        {4, L"侧2",  box(6,  104,  44, 36)},
     };
 
     for (const MouseRegion& region : regions) {
