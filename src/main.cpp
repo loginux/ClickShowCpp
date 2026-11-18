@@ -888,6 +888,8 @@ INT_PTR CALLBACK KeyboardStatsDlgProc(HWND window, UINT message, WPARAM wParam, 
             SetWindowPos(window, nullptr, (sw - w) / 2, (sh - h) / 2, 0, 0,
                          SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
+        // Focus is assigned in ShowKeyboardStats() after the window is shown;
+        // SetFocus() during WM_INITDIALOG has no effect on a hidden window.
         return TRUE;
     }
     case WM_PAINT: {
@@ -936,10 +938,18 @@ INT_PTR CALLBACK KeyboardStatsDlgProc(HWND window, UINT message, WPARAM wParam, 
     return FALSE;
 }
 
+void FocusStatsCloseButton(HWND window) {
+    // A hidden window cannot own focus, so this must run after ShowWindow().
+    // DM_SETDEFID also keeps Enter from activating the destructive reset button.
+    SendMessageW(window, DM_SETDEFID, IDCLOSE, 0);
+    SetFocus(GetDlgItem(window, IDCLOSE));
+}
+
 void ShowKeyboardStats() {
     if (g_keyStatsWindow != nullptr && IsWindow(g_keyStatsWindow)) {
         ShowWindow(g_keyStatsWindow, SW_SHOW);
         SetForegroundWindow(g_keyStatsWindow);
+        FocusStatsCloseButton(g_keyStatsWindow);
         InvalidateRect(g_keyStatsWindow, nullptr, FALSE);
         return;
     }
@@ -947,6 +957,7 @@ void ShowKeyboardStats() {
                                           nullptr, KeyboardStatsDlgProc, 0);
     if (g_keyStatsWindow != nullptr) {
         ShowWindow(g_keyStatsWindow, SW_SHOW);
+        FocusStatsCloseButton(g_keyStatsWindow);
     }
 }
 
