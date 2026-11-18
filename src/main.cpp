@@ -826,19 +826,22 @@ void DrawMouseShape(HDC dc, const RECT& area) {
         maxCount = (std::max)(maxCount, g_counts.Get(i));
     }
 
-    // Authored against a 168x154 reference panel and scaled to the real area,
+    // Authored against a 168x172 reference panel and scaled to the real area,
     // so the mouse keeps its proportions at any DPI (fixed pixels left a tiny
-    // mouse with a lot of empty space on high-DPI screens).
+    // mouse with a lot of empty space on high-DPI screens). The extra height
+    // over the 154-unit figure leaves room for kVerticalShift without clipping.
     constexpr double kRefWidth = 168.0;
-    constexpr double kRefHeight = 154.0;
+    constexpr double kRefHeight = 172.0;
+    constexpr int kVerticalShift = 16; // shift the whole figure down a little
     const double scale = (std::max)(
         1.0, (std::min)((area.right - area.left) / kRefWidth,
                         (area.bottom - area.top) / kRefHeight));
     auto box = [&](int x, int y, int w, int h) -> RECT {
+        const int shiftedY = y + kVerticalShift;
         return RECT{area.left + static_cast<int>(x * scale),
-                    area.top + static_cast<int>(y * scale),
+                    area.top + static_cast<int>(shiftedY * scale),
                     area.left + static_cast<int>((x + w) * scale),
-                    area.top + static_cast<int>((y + h) * scale)};
+                    area.top + static_cast<int>((shiftedY + h) * scale)};
     };
 
     const int fontSize = (std::max)(11, static_cast<int>(12 * scale));
