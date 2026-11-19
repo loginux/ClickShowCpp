@@ -38,12 +38,14 @@
 #define IDC_TXT_MOUSETOTAL          1056
 #define IDC_TXT_KEYTOTAL            1057
 #define IDC_BTN_RESET_KEYCOUNT      1058
+#define IDC_LBL_MOUSETOTAL          1059
 
 #define IDC_TXT_BTN_LEFT            1060
 #define IDC_TXT_BTN_MIDDLE          1061
 #define IDC_TXT_BTN_RIGHT           1062
 #define IDC_TXT_BTN_X1              1063
 #define IDC_TXT_BTN_X2              1064
+#define IDC_LBL_KEYTOTAL            1065
 
 #define IDM_OPEN                    2001
 #define IDM_EXIT                    2002

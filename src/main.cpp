@@ -145,15 +145,17 @@ void UpdateCountsUi() {
     // mouse/keyboard counting off, hide the matching labels instead of showing
     // stale numbers. Shown/hidden together so the grid never shifts per-row.
     static constexpr int kMouseCountIds[] = {
-        IDC_TXT_MOUSETOTAL, IDC_TXT_BTN_LEFT, IDC_TXT_BTN_MIDDLE,
+        IDC_LBL_MOUSETOTAL, IDC_TXT_MOUSETOTAL,
+        IDC_TXT_BTN_LEFT, IDC_TXT_BTN_MIDDLE,
         IDC_TXT_BTN_RIGHT, IDC_TXT_BTN_X1, IDC_TXT_BTN_X2,
     };
     const int mouseCmd = g_settings.enableClickCount ? SW_SHOW : SW_HIDE;
     for (int id : kMouseCountIds) {
         ShowWindow(GetDlgItem(g_mainWindow, id), mouseCmd);
     }
-    ShowWindow(GetDlgItem(g_mainWindow, IDC_TXT_KEYTOTAL),
-               g_settings.enableKeyboardCount ? SW_SHOW : SW_HIDE);
+    const int keyCmd = g_settings.enableKeyboardCount ? SW_SHOW : SW_HIDE;
+    ShowWindow(GetDlgItem(g_mainWindow, IDC_LBL_KEYTOTAL), keyCmd);
+    ShowWindow(GetDlgItem(g_mainWindow, IDC_TXT_KEYTOTAL), keyCmd);
 
     UpdateCountTexts(g_mainWindow);
 }
@@ -981,6 +983,8 @@ void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
 // These controls live on the MAIN window now, so pass g_mainWindow. Called from
 // the main window's WM_INITDIALOG, the periodic refresh timer, and both reset
 // handlers so the numbers stay live while the main window is open.
+// Every label holds the bare number: the text is right-aligned (RTEXT) inside a
+// fixed 8-digit-wide box so values of different lengths line up on the right.
 void UpdateCountTexts(HWND window) {
     static constexpr int kButtonTextIds[clickshow::kButtonCount] = {
         IDC_TXT_BTN_LEFT, IDC_TXT_BTN_MIDDLE, IDC_TXT_BTN_RIGHT,
@@ -988,9 +992,9 @@ void UpdateCountTexts(HWND window) {
     };
 
     SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
-                    (L"键盘计数：" + std::to_wstring(g_keyCounts.Total())).c_str());
+                    std::to_wstring(g_keyCounts.Total()).c_str());
     SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL,
-                    (L"鼠标计数：" + std::to_wstring(g_counts.Total())).c_str());
+                    std::to_wstring(g_counts.Total()).c_str());
     for (int i = 0; i < clickshow::kButtonCount; ++i) {
         // The row already has a checkbox naming the button, so the value label
         // shows the bare number only; the prefix would just crowd the colour
