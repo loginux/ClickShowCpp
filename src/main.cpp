@@ -1126,6 +1126,7 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
         case IDC_CHK_KEYCOUNT:
             g_settings.enableKeyboardCount = IsDlgButtonChecked(window, IDC_CHK_KEYCOUNT) == BST_CHECKED;
+            g_rawInput.ResetKeyStates();
             ScheduleSave();
             return TRUE;
 
@@ -1159,6 +1160,7 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
                 g_settings.buttons[index].alpha = defaults.buttons[index].alpha;
             }
             SetControlsFromSettings();
+            g_rawInput.ResetKeyStates();
             ScheduleSave();
             return TRUE;
         }
@@ -1385,6 +1387,11 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_instance = instance;
 
+    // CreateMutex only sets the last error to ERROR_ALREADY_EXISTS when the
+    // named mutex already exists; when it creates a new one it leaves the last
+    // error untouched. Zero it first so a stale code from an earlier CRT/Win32
+    // call cannot be mistaken for "already running" on a genuinely first launch.
+    SetLastError(ERROR_SUCCESS);
     HANDLE instanceMutex = CreateMutexW(nullptr, TRUE, L"Local\\ClickShowCpp.SingleInstance");
     if (instanceMutex != nullptr && GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr, L"ClickShow 已在运行。\n请查看系统托盘。", L"ClickShow",

@@ -53,6 +53,9 @@ public:
 
     bool Start(HINSTANCE instance, InputCallbacks callbacks);
     void Stop();
+    // Clears the key-down tracking so a key held while the keyboard counter is
+    // disabled does not suppress that key's next press after it is re-enabled.
+    void ResetKeyStates();
     HWND Window() const { return window_; }
 
 private:

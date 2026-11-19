@@ -197,6 +197,10 @@ void RawInput::Stop() {
     remoteControl_ = false;
 }
 
+void RawInput::ResetKeyStates() {
+    std::fill(std::begin(keyDown_), std::end(keyDown_), false);
+}
+
 LRESULT CALLBACK RawInput::WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_NCCREATE) {
         auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
