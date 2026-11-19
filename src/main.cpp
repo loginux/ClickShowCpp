@@ -33,6 +33,7 @@ namespace {
 constexpr UINT_PTR kTimerSave = 2;
 constexpr UINT_PTR kTimerCounts = 3;
 constexpr UINT_PTR kTimerScreenshot = 4;
+constexpr UINT_PTR kTimerRefreshCounts = 5;
 
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kUpdateMessage = WM_APP + 2;
@@ -97,6 +98,7 @@ std::unique_ptr<UpdateResult> g_updateResult;
 void SaveSettingsOnly();
 void SaveCountsOnly();
 void UpdateCountsUi();
+void UpdateCountTexts(HWND window);
 void ScheduleSave();
 void SetControlsFromSettings();
 void ShowMainWindow();
@@ -135,12 +137,25 @@ void SaveCountsOnly() {
 }
 
 void UpdateCountsUi() {
-    // Mouse counts are now drawn inside the count-info dialog (mouse-shaped
-    // panel), not in static controls on the main window. A cheap invalidate
-    // keeps the dialog live while open without a polling timer.
-    if (g_countInfoWindow != nullptr && IsWindowVisible(g_countInfoWindow)) {
-        InvalidateRect(g_countInfoWindow, nullptr, FALSE);
+    if (g_mainWindow == nullptr) {
+        return;
     }
+
+    // Counts only make sense while their feature is enabled: when the user turns
+    // mouse/keyboard counting off, hide the matching labels instead of showing
+    // stale numbers. Shown/hidden together so the grid never shifts per-row.
+    static constexpr int kMouseCountIds[] = {
+        IDC_TXT_MOUSETOTAL, IDC_TXT_BTN_LEFT, IDC_TXT_BTN_MIDDLE,
+        IDC_TXT_BTN_RIGHT, IDC_TXT_BTN_X1, IDC_TXT_BTN_X2,
+    };
+    const int mouseCmd = g_settings.enableClickCount ? SW_SHOW : SW_HIDE;
+    for (int id : kMouseCountIds) {
+        ShowWindow(GetDlgItem(g_mainWindow, id), mouseCmd);
+    }
+    ShowWindow(GetDlgItem(g_mainWindow, IDC_TXT_KEYTOTAL),
+               g_settings.enableKeyboardCount ? SW_SHOW : SW_HIDE);
+
+    UpdateCountTexts(g_mainWindow);
 }
 
 void ScheduleSave() {
@@ -656,10 +671,10 @@ struct HeatRow {
 };
 
 constexpr HeatKey kRowNumber[] = {
-    {VK_OEM_3, 1000, L"`"},  {'0', 1000, nullptr}, {'1', 1000, nullptr},
-    {'2', 1000, nullptr},    {'3', 1000, nullptr}, {'4', 1000, nullptr},
-    {'5', 1000, nullptr},    {'6', 1000, nullptr}, {'7', 1000, nullptr},
-    {'8', 1000, nullptr},    {'9', 1000, nullptr}, {VK_OEM_MINUS, 1000, L"-"},
+    {VK_OEM_3, 1000, L"`"},  {'1', 1000, nullptr}, {'2', 1000, nullptr},
+    {'3', 1000, nullptr},    {'4', 1000, nullptr}, {'5', 1000, nullptr},
+    {'6', 1000, nullptr},    {'7', 1000, nullptr}, {'8', 1000, nullptr},
+    {'9', 1000, nullptr},    {'0', 1000, nullptr}, {VK_OEM_MINUS, 1000, L"-"},
     {VK_OEM_PLUS, 1000, L"="}, {VK_BACK, 2000, L"Backspace"},
 };
 constexpr HeatKey kRowQ[] = {
@@ -687,6 +702,8 @@ constexpr HeatKey kRowBottom[] = {
     {VK_SPACE, 6250, L""},        {VK_RMENU, 1250, L"Alt"}, {VK_RWIN, 1250, L"Win"},
     {VK_APPS, 1250, L"Menu"},     {VK_RCONTROL, 1250, L"Ctrl"},
 };
+// Function row: Esc, F1..F12 (grouped in fours), then Print Screen / Scroll
+// Lock / Pause. Drawn at the very top, spanning the full width.
 constexpr HeatKey kRowFunction[] = {
     {VK_ESCAPE, 1000, L"Esc"}, {VK_F1, 1000, L"F1"}, {VK_F2, 1000, L"F2"},
     {VK_F3, 1000, L"F3"},      {VK_F4, 1000, L"F4"}, {VK_F5, 1000, L"F5"},
@@ -694,22 +711,27 @@ constexpr HeatKey kRowFunction[] = {
     {VK_F9, 1000, L"F9"},      {VK_F10, 1000, L"F10"}, {VK_F11, 1000, L"F11"},
     {VK_F12, 1000, L"F12"},
 };
-constexpr HeatKey kRowNav[] = {
+constexpr HeatKey kRowSys[] = {
     {VK_SNAPSHOT, 1000, L"PrtSc"}, {VK_SCROLL, 1000, L"ScrLk"}, {VK_PAUSE, 1000, L"Pause"},
-    {VK_INSERT, 1000, L"Ins"},     {VK_HOME, 1000, L"Home"},    {VK_PRIOR, 1000, L"PgUp"},
-    {VK_DELETE, 1000, L"Del"},     {VK_END, 1000, L"End"},      {VK_NEXT, 1000, L"PgDn"},
-    {VK_UP, 1000, L"Up"},          {VK_LEFT, 1000, L"Left"},    {VK_DOWN, 1000, L"Down"},
-    {VK_RIGHT, 1000, L"Right"},
+};
+// Navigation cluster (3 columns x 2 rows), sitting to the right of the main
+// block and above the arrow keys, like a real 104-key board.
+constexpr HeatKey kClusterTop[] = {
+    {VK_INSERT, 1000, L"Ins"}, {VK_HOME, 1000, L"Home"}, {VK_PRIOR, 1000, L"PgUp"},
+};
+constexpr HeatKey kClusterBottom[] = {
+    {VK_DELETE, 1000, L"Del"}, {VK_END, 1000, L"End"}, {VK_NEXT, 1000, L"PgDn"},
 };
 
+// Main block: 5 rows (function row is drawn separately, above). Each row is 15
+// key-units wide; the first key of each row is progressively wider, which gives
+// the letter columns their natural left-to-right stagger.
 constexpr HeatRow kHeatRows[] = {
-    {kRowFunction, static_cast<int>(std::size(kRowFunction))},
-    {kRowNumber,   static_cast<int>(std::size(kRowNumber))},
-    {kRowQ,        static_cast<int>(std::size(kRowQ))},
-    {kRowA,        static_cast<int>(std::size(kRowA))},
-    {kRowZ,        static_cast<int>(std::size(kRowZ))},
-    {kRowBottom,   static_cast<int>(std::size(kRowBottom))},
-    {kRowNav,      static_cast<int>(std::size(kRowNav))},
+    {kRowNumber, static_cast<int>(std::size(kRowNumber))},
+    {kRowQ,      static_cast<int>(std::size(kRowQ))},
+    {kRowA,      static_cast<int>(std::size(kRowA))},
+    {kRowZ,      static_cast<int>(std::size(kRowZ))},
+    {kRowBottom, static_cast<int>(std::size(kRowBottom))},
 };
 
 constexpr BYTE Nk(clickshow::PhysicalKey key) {
@@ -777,10 +799,22 @@ COLORREF HeatColor(double ratio) {
 
 constexpr int kHeatKeyGap = 3;
 constexpr int kHeatRowGap = 5;
-constexpr int kHeatRowCount = static_cast<int>(std::size(kHeatRows));
-constexpr double kHeatMainUnits = 16.0; // widest main row is 15 units + 1 gap
-constexpr double kHeatTotalUnits = 20.5; // main block + gap + 4-column numpad
-constexpr int kHeatNumpadFirstRow = 1;   // aligned with the number row
+// Function row (row 0) + 5 main rows (rows 1..5). Row height is computed from
+// the area and this count; the nav cluster and arrow keys occupy rows 1-2 and
+// 4-5 respectively on the right side.
+constexpr int kHeatRowCount = 6;
+// Horizontal geometry in key-units (1.0 = a standard letter key):
+//   main block      0 .. 15
+//   nav cluster     15.5 .. 18.5   (3 columns, right of the main block)
+//   gap
+//   numpad          19.5 .. 23.5   (4 columns)
+constexpr double kHeatMainUnits = 15.0;
+constexpr double kHeatClusterX = 15.5;
+constexpr double kHeatClusterWidth = 3.0;
+constexpr double kHeatNumpadX = 19.5;
+constexpr double kHeatNumpadWidth = 4.0;
+constexpr double kHeatTotalUnits = 23.5; // full drawn width in key units
+constexpr int kHeatNumpadFirstRow = 1;   // numpad aligns with the number row
 
 void TrackHeatMax(uint64_t& maxCount, const HeatRow& row) {
     for (int i = 0; i < row.count; ++i) {
@@ -817,98 +851,6 @@ void DrawHeatKey(HDC dc, const HeatKey& key, int x, int y, int keyHeight,
     }
 }
 
-// Mouse-shaped count display. Regions use the same HeatColor scale as the
-// keyboard heatmap so the two panels of the count-info dialog look consistent.
-// Button order matches clickshow::ButtonIndex (Left, Middle, Right, X1, X2).
-void DrawMouseShape(HDC dc, const RECT& area) {
-    uint64_t maxCount = 0;
-    for (int i = 0; i < clickshow::kButtonCount; ++i) {
-        maxCount = (std::max)(maxCount, g_counts.Get(i));
-    }
-
-    // Authored against a 168x172 reference panel and scaled to the real area,
-    // so the mouse keeps its proportions at any DPI (fixed pixels left a tiny
-    // mouse with a lot of empty space on high-DPI screens). The extra height
-    // over the 154-unit figure leaves room for kVerticalShift without clipping.
-    constexpr double kRefWidth = 168.0;
-    constexpr double kRefHeight = 172.0;
-    constexpr int kVerticalShift = 16; // shift the whole figure down a little
-    const double scale = (std::max)(
-        1.0, (std::min)((area.right - area.left) / kRefWidth,
-                        (area.bottom - area.top) / kRefHeight));
-    auto box = [&](int x, int y, int w, int h) -> RECT {
-        const int shiftedY = y + kVerticalShift;
-        return RECT{area.left + static_cast<int>(x * scale),
-                    area.top + static_cast<int>(shiftedY * scale),
-                    area.left + static_cast<int>((x + w) * scale),
-                    area.top + static_cast<int>((shiftedY + h) * scale)};
-    };
-
-    const int fontSize = (std::max)(11, static_cast<int>(12 * scale));
-    HFONT font = CreateFontW(-fontSize, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
-    HFONT oldFont = static_cast<HFONT>(SelectObject(dc, font));
-    SetBkMode(dc, TRANSPARENT);
-
-    constexpr int kBodyX = 46;
-    constexpr int kBodyY = 34;
-    constexpr int kBodyWidth = 118;
-    constexpr int kBodyHeight = 116;
-
-    // Light rounded shell: the neutral end of the heat scale.
-    RECT shell = box(kBodyX, kBodyY, kBodyWidth, kBodyHeight);
-    HBRUSH shellBrush = CreateSolidBrush(HeatColor(0.0));
-    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(dc, shellBrush));
-    RoundRect(dc, shell.left, shell.top, shell.right, shell.bottom,
-              static_cast<int>(26 * scale), static_cast<int>(26 * scale));
-    SelectObject(dc, oldBrush);
-    DeleteObject(shellBrush);
-
-    struct MouseRegion {
-        int button;
-        const wchar_t* label;
-        RECT rect;
-    };
-    // Layout follows the reference sketch: left/middle/right buttons in a row
-    // across the top edge, side 1 and side 2 stacked along the left edge, and
-    // the rounded body occupying the lower-right area. The button boxes ride
-    // slightly over the body edge, like the sketch.
-    const MouseRegion regions[] = {
-        {0, L"左键", box(46,   4,  36, 34)},
-        {1, L"中键", box(86,   4,  32, 34)},
-        {2, L"右键", box(122,  4,  38, 34)},
-        {3, L"侧1",  box(6,   62,  44, 36)},
-        {4, L"侧2",  box(6,  104,  44, 36)},
-    };
-
-    for (const MouseRegion& region : regions) {
-        const uint64_t count = g_counts.Get(region.button);
-        const double ratio = maxCount > 0 ? static_cast<double>(count) / maxCount : 0.0;
-        HBRUSH brush = CreateSolidBrush(HeatColor(ratio));
-        FillRect(dc, &region.rect, brush);
-        DeleteObject(brush);
-        FrameRect(dc, &region.rect, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
-
-        SetTextColor(dc, RGB(30, 30, 30));
-        const int regionHeight = region.rect.bottom - region.rect.top;
-        RECT labelRect = region.rect;
-        labelRect.bottom = region.rect.top + regionHeight / 2;
-        DrawTextW(dc, region.label, -1, &labelRect,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
-        if (count > 0) {
-            RECT countRect = region.rect;
-            countRect.top = region.rect.top + regionHeight / 2;
-            const std::wstring text = std::to_wstring(count);
-            DrawTextW(dc, text.c_str(), -1, &countRect,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
-        }
-    }
-
-    SelectObject(dc, oldFont);
-    DeleteObject(font);
-}
-
 void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
     uint64_t maxCount = 0;
     for (const HeatRow& row : kHeatRows) {
@@ -917,23 +859,69 @@ void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
     for (const HeatRow& row : kNumpadRows) {
         TrackHeatMax(maxCount, row);
     }
+    for (const HeatKey& key : kRowFunction) {
+        maxCount = (std::max)(maxCount, g_keyCounts.Get(key.vkey));
+    }
+    for (const HeatKey& key : kRowSys) {
+        maxCount = (std::max)(maxCount, g_keyCounts.Get(key.vkey));
+    }
+    for (const HeatKey& key : kClusterTop) {
+        maxCount = (std::max)(maxCount, g_keyCounts.Get(key.vkey));
+    }
+    for (const HeatKey& key : kClusterBottom) {
+        maxCount = (std::max)(maxCount, g_keyCounts.Get(key.vkey));
+    }
+    maxCount = (std::max)(maxCount, g_keyCounts.Get(VK_UP));
+    maxCount = (std::max)(maxCount, g_keyCounts.Get(VK_LEFT));
+    maxCount = (std::max)(maxCount, g_keyCounts.Get(VK_DOWN));
+    maxCount = (std::max)(maxCount, g_keyCounts.Get(VK_RIGHT));
 
     const int keyHeight =
         (area.bottom - area.top - (kHeatRowCount - 1) * kHeatRowGap) / kHeatRowCount;
     const double unitWidth =
         static_cast<double>(area.right - area.left) / kHeatTotalUnits;
-    const int numpadX = area.left + static_cast<int>(kHeatMainUnits * unitWidth);
+    const int rowPitch = keyHeight + kHeatRowGap;
+    const int clusterX = area.left + static_cast<int>(kHeatClusterX * unitWidth);
+    const int numpadX = area.left + static_cast<int>(kHeatNumpadX * unitWidth);
 
-    HFONT font = CreateFontW(-13, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+    // Scale the label font with the cell height so shrinking the dialog keeps
+    // the text inside the keys instead of spilling across rows.
+    const int fontSize = (std::max)(10, (std::min)(13, keyHeight / 2));
+    HFONT font = CreateFontW(-fontSize, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
                              DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
                              CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
     HFONT oldFont = static_cast<HFONT>(SelectObject(dc, font));
     SetBkMode(dc, TRANSPARENT);
 
-    for (int r = 0; r < kHeatRowCount; ++r) {
+    // --- Function row (row 0): Esc, F1..F12, then PrtSc/ScrLk/Pause. ---
+    {
+        // F keys are grouped in fours (F1-F4, F5-F8, F9-F12) with a half-key
+        // gap between groups, and Esc sits alone at the far left.
+        // kRowFunction is laid out as Esc, F1..F12.
+        int x = area.left;
+        const int y = area.top;
+        const int keyStep = static_cast<int>(unitWidth);
+        for (int i = 0; i < static_cast<int>(std::size(kRowFunction)); ++i) {
+            DrawHeatKey(dc, kRowFunction[i], x, y, keyHeight, unitWidth, maxCount);
+            x += keyStep;
+            // Insert a gap after Esc (i==0) and after every 4th F key (i==4,8).
+            if (i == 0 || i == 4 || i == 8) {
+                x += keyStep / 2;
+            }
+        }
+        // System keys sit at the far right, above the nav cluster.
+        int sx = clusterX;
+        for (const HeatKey& key : kRowSys) {
+            DrawHeatKey(dc, key, sx, y, keyHeight, unitWidth, maxCount);
+            sx += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+        }
+    }
+
+    // --- Main block: 5 rows (rows 1..5), each 15 units wide. ---
+    for (int r = 0; r < static_cast<int>(std::size(kHeatRows)); ++r) {
         const HeatRow& row = kHeatRows[r];
         int x = area.left;
-        const int y = area.top + r * (keyHeight + kHeatRowGap);
+        const int y = area.top + (r + 1) * rowPitch;
         for (int i = 0; i < row.count; ++i) {
             const HeatKey& key = row.keys[i];
             DrawHeatKey(dc, key, x, y, keyHeight, unitWidth, maxCount);
@@ -941,11 +929,43 @@ void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
         }
     }
 
+    // --- Nav cluster (3x2): rows 1..2, right of the main block. ---
+    {
+        int x = clusterX;
+        const int yTop = area.top + 1 * rowPitch;
+        for (const HeatKey& key : kClusterTop) {
+            DrawHeatKey(dc, key, x, yTop, keyHeight, unitWidth, maxCount);
+            x += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+        }
+        x = clusterX;
+        const int yBottom = area.top + 2 * rowPitch;
+        for (const HeatKey& key : kClusterBottom) {
+            DrawHeatKey(dc, key, x, yBottom, keyHeight, unitWidth, maxCount);
+            x += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+        }
+    }
+
+    // --- Arrow keys (inverted T): Up on the middle column of row 4, then
+    // Left/Down/Right across row 5, all full-height keys. ---
+    {
+        const int colW = static_cast<int>(unitWidth);
+        const int yUp = area.top + 4 * rowPitch;
+        const int yLr = area.top + 5 * rowPitch;
+        DrawHeatKey(dc, HeatKey{VK_UP, 1000, L"Up"}, clusterX + colW, yUp,
+                    keyHeight, unitWidth, maxCount);
+        DrawHeatKey(dc, HeatKey{VK_LEFT, 1000, L"Left"}, clusterX, yLr,
+                    keyHeight, unitWidth, maxCount);
+        DrawHeatKey(dc, HeatKey{VK_DOWN, 1000, L"Down"}, clusterX + colW, yLr,
+                    keyHeight, unitWidth, maxCount);
+        DrawHeatKey(dc, HeatKey{VK_RIGHT, 1000, L"Right"}, clusterX + 2 * colW,
+                    yLr, keyHeight, unitWidth, maxCount);
+    }
+
+    // --- Numpad: 4 columns, rows 1..5. ---
     for (int r = 0; r < static_cast<int>(std::size(kNumpadRows)); ++r) {
         const HeatRow& row = kNumpadRows[r];
         int x = numpadX;
-        const int y = area.top +
-            (kHeatNumpadFirstRow + r) * (keyHeight + kHeatRowGap);
+        const int y = area.top + (kHeatNumpadFirstRow + r) * rowPitch;
         for (int i = 0; i < row.count; ++i) {
             const HeatKey& key = row.keys[i];
             DrawHeatKey(dc, key, x, y, keyHeight, unitWidth, maxCount);
@@ -957,14 +977,33 @@ void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
     DeleteObject(font);
 }
 
+// Refreshes every count label: the two totals plus one label per mouse button.
+// These controls live on the MAIN window now, so pass g_mainWindow. Called from
+// the main window's WM_INITDIALOG, the periodic refresh timer, and both reset
+// handlers so the numbers stay live while the main window is open.
+void UpdateCountTexts(HWND window) {
+    static constexpr int kButtonTextIds[clickshow::kButtonCount] = {
+        IDC_TXT_BTN_LEFT, IDC_TXT_BTN_MIDDLE, IDC_TXT_BTN_RIGHT,
+        IDC_TXT_BTN_X1, IDC_TXT_BTN_X2,
+    };
+
+    SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
+                    (L"键盘计数：" + std::to_wstring(g_keyCounts.Total())).c_str());
+    SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL,
+                    (L"鼠标计数：" + std::to_wstring(g_counts.Total())).c_str());
+    for (int i = 0; i < clickshow::kButtonCount; ++i) {
+        // The row already has a checkbox naming the button, so the value label
+        // shows the bare number only; the prefix would just crowd the colour
+        // swatch it sits next to.
+        SetDlgItemTextW(window, kButtonTextIds[i],
+                        std::to_wstring(g_counts.Get(i)).c_str());
+    }
+}
+
 INT_PTR CALLBACK CountInfoDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM) {
     switch (message) {
     case WM_INITDIALOG: {
         g_countInfoWindow = window;
-        SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL,
-                        std::to_wstring(g_counts.Total()).c_str());
-        SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
-                        std::to_wstring(g_keyCounts.Total()).c_str());
         RECT rect{};
         if (GetWindowRect(window, &rect)) {
             const int w = rect.right - rect.left;
@@ -983,46 +1022,26 @@ INT_PTR CALLBACK CountInfoDlgProc(HWND window, UINT message, WPARAM wParam, LPAR
         HDC dc = BeginPaint(window, &ps);
         RECT client{};
         GetClientRect(window, &client);
-        // Left panel: keyboard heatmap. Right panel: mouse-shaped click counts
-        // (matches a real desk, where the mouse sits to the right of the board).
-        // Splitting by client width keeps the layout correct at any DPI.
-        const int keyRight =
-            client.left + static_cast<int>((client.right - client.left) * 0.81);
-        const int mouseLeft =
-            client.left + static_cast<int>((client.right - client.left) * 0.82);
-        RECT keyArea{client.left + 12, client.top + 48,
-                     keyRight, client.bottom - 10};
-        RECT mouseArea{mouseLeft, client.top + 48,
-                       client.right - 12, client.bottom - 10};
+        // The dialog template is in dialog units, which Windows scales with the
+        // monitor DPI, but the client rect is in physical pixels. Scale the
+        // fixed margins the same way so the drawn panel stays clear of the
+        // (DPI-scaled) close button on high-DPI screens instead of colliding.
+        // All counts now live on the main window, so this page is nothing but
+        // the keyboard heatmap plus the close button.
+        const UINT dpi = clickshow::GetDpiForWindowSafe(window);
+        const int margin = MulDiv(10, static_cast<int>(dpi), 96);
+        // The close button sits at y=6 with height 17 (bottom edge ~23 DLU);
+        // leave a generous gap below it.
+        const int topGap = MulDiv(40, static_cast<int>(dpi), 96);
+        const int bottomGap = MulDiv(6, static_cast<int>(dpi), 96);
+        RECT keyArea{client.left + margin, client.top + topGap,
+                     client.right - margin, client.bottom - bottomGap};
         DrawKeyboardHeatmap(dc, keyArea);
-        DrawMouseShape(dc, mouseArea);
-        SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL,
-                        std::to_wstring(g_counts.Total()).c_str());
-        SetDlgItemTextW(window, IDC_TXT_KEYTOTAL,
-                        std::to_wstring(g_keyCounts.Total()).c_str());
         EndPaint(window, &ps);
         return TRUE;
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-        case IDC_BTN_RESET_MOUSECOUNT:
-            if (MessageBoxW(window, L"确定要重置所有鼠标点击计数吗？", L"ClickShow",
-                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                g_counts.Reset();
-                SaveCountsOnly();
-                SetDlgItemTextW(window, IDC_TXT_MOUSETOTAL, L"0");
-                InvalidateRect(window, nullptr, FALSE);
-            }
-            return TRUE;
-        case IDC_BTN_RESET_KEYCOUNT:
-            if (MessageBoxW(window, L"确定要重置所有键盘计数吗？", L"ClickShow",
-                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                g_keyCounts.Reset();
-                SaveCountsOnly();
-                SetDlgItemTextW(window, IDC_TXT_KEYTOTAL, L"0");
-                InvalidateRect(window, nullptr, FALSE);
-            }
-            return TRUE;
         case IDCLOSE:
         case IDCANCEL:
             ShowWindow(window, SW_HIDE);
@@ -1093,6 +1112,7 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
         SetControlsFromSettings();
         ShowWindow(GetDlgItem(window, IDC_LBL_NEWVERSION), SW_HIDE);
+        UpdateCountTexts(window);
 
         RECT rect{};
         if (GetWindowRect(window, &rect)) {
@@ -1121,12 +1141,14 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
         case IDC_CHK_COUNT:
             g_settings.enableClickCount = IsDlgButtonChecked(window, IDC_CHK_COUNT) == BST_CHECKED;
+            UpdateCountsUi();
             ScheduleSave();
             return TRUE;
 
         case IDC_CHK_KEYCOUNT:
             g_settings.enableKeyboardCount = IsDlgButtonChecked(window, IDC_CHK_KEYCOUNT) == BST_CHECKED;
             g_rawInput.ResetKeyStates();
+            UpdateCountsUi();
             ScheduleSave();
             return TRUE;
 
@@ -1142,6 +1164,25 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
 
         case IDC_BTN_COUNT_INFO:
             ShowCountInfo();
+            return TRUE;
+
+        case IDC_BTN_RESET_MOUSECOUNT:
+            if (MessageBoxW(window, L"确定要重置所有鼠标点击计数吗？", L"ClickShow",
+                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                g_counts.Reset();
+                SaveCountsOnly();
+                UpdateCountTexts(window);
+            }
+            return TRUE;
+
+        case IDC_BTN_RESET_KEYCOUNT:
+            if (MessageBoxW(window, L"确定要重置所有键盘计数吗？", L"ClickShow",
+                            MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                g_keyCounts.Reset();
+                SaveCountsOnly();
+                UpdateCountTexts(window);
+                g_rawInput.ResetKeyStates();
+            }
             return TRUE;
 
         case IDC_BTN_DEFAULT: {
@@ -1261,6 +1302,11 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         case kTimerScreenshot:
             g_overlay.RestoreAfterScreenshot();
             KillTimer(window, kTimerScreenshot);
+            return TRUE;
+        case kTimerRefreshCounts:
+            // Counts change from global input while the main window is open;
+            // keep the labels live without waiting for a repaint.
+            UpdateCountTexts(window);
             return TRUE;
         default:
             break;
@@ -1460,6 +1506,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     SetTimer(g_mainWindow, kTimerCounts, 10 * 60 * 1000, nullptr);
+    SetTimer(g_mainWindow, kTimerRefreshCounts, 1000, nullptr);
     StartUpdateCheck();
 
     MSG message{};

@@ -39,6 +39,12 @@
 #define IDC_TXT_KEYTOTAL            1057
 #define IDC_BTN_RESET_KEYCOUNT      1058
 
+#define IDC_TXT_BTN_LEFT            1060
+#define IDC_TXT_BTN_MIDDLE          1061
+#define IDC_TXT_BTN_RIGHT           1062
+#define IDC_TXT_BTN_X1              1063
+#define IDC_TXT_BTN_X2              1064
+
 #define IDM_OPEN                    2001
 #define IDM_EXIT                    2002
 
