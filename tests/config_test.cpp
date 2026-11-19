@@ -278,6 +278,14 @@ void TestVersionComparison() {
     // than 1.6. Any future release must therefore be numbered 1.52 or higher.
     CHECK(clickshow::CompareVersions(L"1.6", L"1.51") < 0,
           L"1.6 compares older than 1.51 (minor 6 < 51)");
+    // Crossing a major version: the first segment carries the most weight, so
+    // 2.00 beats every 1.x. Guards the 1.x -> 2.00 upgrade path.
+    CHECK(clickshow::CompareVersions(L"2.00", L"1.74") > 0,
+          L"2.00 is newer than 1.74 (major 2 > 1)");
+    CHECK(clickshow::CompareVersions(L"1.74", L"2.00") < 0,
+          L"1.74 is older than 2.00");
+    CHECK(clickshow::CompareVersions(L"2.01", L"2.00") > 0,
+          L"2.01 is newer than 2.00");
 }
 
 void TestJsonSafety() {
