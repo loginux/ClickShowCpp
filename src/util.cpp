@@ -129,6 +129,23 @@ bool EnsureParentDirectoryExists(const std::wstring& path) {
         if (prefix == L"\\" || prefix == L"\\\\" || i == uncServerSeparator) {
             continue;
         }
+        // Probe before creating. CreateDirectoryW on an existing drive root
+        // ("C:\") fails with ERROR_ACCESS_DENIED instead of
+        // ERROR_ALREADY_EXISTS, which used to abort every save with
+        // "access denied" even though the folder was perfectly writable.
+        const DWORD attributes = GetFileAttributesW(prefix.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES) {
+            if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                continue;  // already a directory
+            }
+            return false;  // a file is sitting where the directory should be
+        }
+        const DWORD statError = GetLastError();
+        if (statError != ERROR_FILE_NOT_FOUND && statError != ERROR_PATH_NOT_FOUND) {
+            // Present but unreadable (e.g. access denied): let the actual file
+            // write surface the real error instead of failing here.
+            continue;
+        }
         if (!CreateDirectoryW(prefix.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
             return false;
         }

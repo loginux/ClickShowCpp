@@ -77,6 +77,63 @@
 
 ---
 
+## 2.02 — 修复「设置或计数保存失败」
+
+### 现象
+
+程序运行一段时间后弹出「设置或计数保存失败，本次改动可能不会保留。」，确认只有一个
+进程在跑。`%LOCALAPPDATA%\ClickShow\` 下只有 `error.log` 和两个计数文件，**没有
+`ClickShow.setting`**。
+
+### 日志证据
+
+`error.log` 中每隔一段时间成组出现（10:41 之后的运行）：
+
+```
+[11:45:47.221] WriteAtomic.Dir
+拒绝访问。 | C:\Users\admin\AppData\Local\ClickShow\ClickShow.counts
+[11:45:47.222] Counts.SaveJson
+写入 ... 失败，回退到 counts.ini
+[11:45:47.222] Counts.SaveIni.Dir
+拒绝访问。 | C:\Users\admin\AppData\Local\ClickShow\counts.ini
+```
+
+设置、键盘计数同理——**所有**写入都倒在同一个函数 `WriteAtomic.Dir` 上。
+
+### 根因
+
+`EnsureParentDirectoryExists`（2.01 为替代 C++17 filesystem 新写的）逐级遍历路径、
+对每个前缀直接调 `CreateDirectoryW`，只把 `ERROR_ALREADY_EXISTS` 当作「已存在」放过。
+
+实测各级目录的返回码：
+
+```
+'C:\'                                             ok=0 err=5    (ERROR_ACCESS_DENIED)
+'C:\Users\'                                       ok=0 err=183  (ERROR_ALREADY_EXISTS)
+'C:\Users\admin\AppData\Local\ClickShow\'         ok=0 err=183
+```
+
+**驱动器根 `C:\` 返回的是 5 而不是 183**，于是函数在第一个前缀就 return false，
+整个保存链路（JSON → INI 回退）全部失败。10:00 时还能写，是因为那时跑的还是用
+`std::filesystem` 的旧版本；换新实现后 10:41 起所有保存都没成功过。
+
+### 修复
+
+创建前先用 `GetFileAttributesW` 探测：已是目录就跳过；是文件则返回失败；
+只有明确 `ERROR_FILE_NOT_FOUND` / `ERROR_PATH_NOT_FOUND` 才真正 `CreateDirectoryW`。
+「存在但读不到（拒绝访问）」按存在处理，让后续真正的写操作报错，与 `PathExists`
+的语义保持一致。
+
+### 验证
+
+- 新增回归测试 `TestEnsureParentDirectory`：用当前盘符的绝对路径
+  (`<cwd>\build_direct\config_test\parent_probe\nested\probe.json`) 准备目录，
+  正好覆盖「驱动器根」这个前缀；`ctest` 1/1 通过。
+- 实机：修复前 `ClickShow.setting` 不存在；修复后切换一次开关，文件生成（531 B），
+  `error.log` 无任何新增写入错误，开关状态回到原值。
+
+---
+
 ## 2.01 — 功能键行与主键区对齐
 
 ### 现象

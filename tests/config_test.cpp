@@ -255,6 +255,31 @@ void TestUnreadableFileIsNotOverwritten(const std::wstring& dir) {
     RemoveDirectoryW(path.c_str());
 }
 
+// Regression: a save under %LOCALAPPDATA% walks C:\Users\... and used to call
+// CreateDirectoryW on the drive root, which answers ERROR_ACCESS_DENIED (not
+// ERROR_ALREADY_EXISTS) and aborted every save. Use an absolute path rooted at
+// the current drive to exercise exactly that prefix.
+void TestEnsureParentDirectory(const std::wstring& dir) {
+    wchar_t cwd[MAX_PATH]{};
+    GetCurrentDirectoryW(MAX_PATH, cwd);
+    const std::wstring base = std::wstring(cwd) + L"\\" + dir + L"\\parent_probe";
+    const std::wstring nested = base + L"\\nested";
+    const std::wstring path = nested + L"\\probe.json";
+
+    CHECK(clickshow::EnsureParentDirectoryExists(path),
+          L"absolute path with a drive root can be prepared");
+    const DWORD attributes = GetFileAttributesW(nested.c_str());
+    CHECK(attributes != INVALID_FILE_ATTRIBUTES &&
+              (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0,
+          L"nested directories were actually created");
+    // Running again on directories that already exist must also succeed.
+    CHECK(clickshow::EnsureParentDirectoryExists(path),
+          L"existing directories still report success");
+
+    RemoveDirectoryW(nested.c_str());
+    RemoveDirectoryW(base.c_str());
+}
+
 void TestVersionComparison() {
     // The update check compares the server string against kAppVersion, so the
     // two-component form used since 1.51 must order correctly.
@@ -317,6 +342,7 @@ int wmain() {
     TestUnreadableFileIsNotOverwritten(dir);
     TestKeyCountsUnreadableNotOverwritten(dir);
     TestCountsRoundtrip(dir);
+    TestEnsureParentDirectory(dir);
     TestVersionComparison();
     TestJsonSafety();
 
