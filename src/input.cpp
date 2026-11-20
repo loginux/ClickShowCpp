@@ -103,6 +103,10 @@ BYTE PhysicalVirtualKey(USHORT vkey, USHORT makeCode, USHORT flags) {
 // movement that pushes further outwards is ignored (see IsPushingOutwards).
 constexpr ULONGLONG kParkedFreezeMs = 150;
 constexpr LONG kParkedMinTravel = 40;
+// Upper bound on how long a takeover may suppress counting. A genuine KVM /
+// remote-control session ends with the cursor moving; a pointer-locked game
+// does not, so it needs this escape hatch.
+constexpr ULONGLONG kRemoteControlMaxMs = 30000;
 
 }  // namespace
 
@@ -211,7 +215,11 @@ LRESULT CALLBACK RawInput::WndProc(HWND window, UINT message, WPARAM wParam, LPA
 
     auto* self = reinterpret_cast<RawInput*>(GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_INPUT && self != nullptr) {
-        return self->HandleInput(lParam);
+        self->HandleInput(lParam);
+        // Microsoft requires DefWindowProc for WM_INPUT (both RIM_INPUT and
+        // RIM_INPUTSINK) so the system can perform its cleanup for the raw
+        // input buffer. Returning early used to skip that step.
+        return DefWindowProcW(window, message, wParam, lParam);
     }
     if (message == WM_DESTROY) {
         return 0;
@@ -256,10 +264,27 @@ bool RawInput::TrackRemoteControl(POINT cursor, LONG dx, LONG dy, bool absolute)
         parkedTravelX_ = 0;
         parkedTravelY_ = 0;
         parkedSince_ = now;
+        gaveUp_ = false;
         if (remoteControl_) {
             remoteControl_ = false;
             LogError(L"RawInput.RemoteControl", L"鼠标交还本地控制，恢复计数");
         }
+        return false;
+    }
+
+    // Pointer-locked games park the cursor in the middle of the screen and keep
+    // sending deltas, which matches the takeover heuristic exactly. The cursor
+    // never moves there, so without a time limit the app would stay suppressed
+    // for the entire game session. After a generous window, stop suppressing
+    // until the cursor moves again (i.e. the real state changed).
+    if (remoteControl_ && now - remoteSince_ >= kRemoteControlMaxMs) {
+        remoteControl_ = false;
+        gaveUp_ = true;
+        LogError(L"RawInput.RemoteControl",
+                 L"接管持续超过 30 秒，判定为指针锁定，恢复计数");
+        return false;
+    }
+    if (gaveUp_) {
         return false;
     }
 
@@ -301,6 +326,7 @@ bool RawInput::TrackRemoteControl(POINT cursor, LONG dx, LONG dy, bool absolute)
     if (!remoteControl_ && travel >= kParkedMinTravel &&
         frozenMs >= kParkedFreezeMs) {
         remoteControl_ = true;
+        remoteSince_ = now;
         LogError(L"RawInput.RemoteControl",
                   L"检测到鼠标被远程控制软件接管，忽略此时的点击");
     }

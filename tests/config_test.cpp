@@ -259,6 +259,38 @@ void TestUnreadableFileIsNotOverwritten(const std::wstring& dir) {
 // CreateDirectoryW on the drive root, which answers ERROR_ACCESS_DENIED (not
 // ERROR_ALREADY_EXISTS) and aborted every save. Use an absolute path rooted at
 // the current drive to exercise exactly that prefix.
+// A negative or oversized count used to wrap to UINT64_MAX through
+// _wcstoui64 and then be written straight back. It must be dropped instead,
+// while the rest of the same file still loads and the file is rewritten clean.
+void TestCorruptCountsAreRejected(const std::wstring& dir) {
+    const std::wstring path = dir + L"\\corrupt.counts";
+    DeleteFileW((path + L".ini").c_str());
+    DeleteFileW(path.c_str());
+
+    // 1048576 = left, 2097152 = middle, 16777216 = x2 (see CountStore::SaveJson).
+    const std::wstring text =
+        L"{\"Counts\":[{\"Key\":1048576,\"Value\":-1},"
+        L"{\"Key\":2097152,\"Value\":18446744073709551616},"
+        L"{\"Key\":16777216,\"Value\":7}]}";
+    CHECK(clickshow::WriteFileAtomicUtf8(path, text), L"writing the corrupt counts file");
+
+    clickshow::CountStore store(path);
+    store.Load();
+    CHECK(store.Get(clickshow::kLeft) == 0,
+          L"a negative count is dropped instead of wrapping to UINT64_MAX");
+    CHECK(store.Get(clickshow::kMiddle) == 0, L"an overflowing count is dropped");
+    CHECK(store.Get(clickshow::kX2) == 7,
+          L"a valid count in the same file still loads");
+    CHECK(store.Total() == 7, L"Total ignores the dropped entries");
+
+    CHECK(store.Save(), L"a file with garbage entries can still be saved");
+    std::wstring rewritten;
+    CHECK(clickshow::ReadFileUtf8(path, rewritten), L"re-reading the rewritten file");
+    CHECK(rewritten.find(L"-1") == std::wstring::npos &&
+              rewritten.find(L"18446744073709551616") == std::wstring::npos,
+          L"the rewritten file no longer contains the bad entries");
+}
+
 void TestEnsureParentDirectory(const std::wstring& dir) {
     wchar_t cwd[MAX_PATH]{};
     GetCurrentDirectoryW(MAX_PATH, cwd);
@@ -342,6 +374,7 @@ int wmain() {
     TestUnreadableFileIsNotOverwritten(dir);
     TestKeyCountsUnreadableNotOverwritten(dir);
     TestCountsRoundtrip(dir);
+    TestCorruptCountsAreRejected(dir);
     TestEnsureParentDirectory(dir);
     TestVersionComparison();
     TestJsonSafety();

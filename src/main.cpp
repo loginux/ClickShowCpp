@@ -53,6 +53,10 @@ constexpr UINT kButtonCheckboxIds[clickshow::kButtonCount] = {
 
 HINSTANCE g_instance = nullptr;
 HWND g_mainWindow = nullptr;
+// LoadImageW copies; DestroyIcon is ours to call. WM_SETICON does not take
+// ownership, and Windows does not free window icons on destruction.
+HICON g_mainBigIcon = nullptr;
+HICON g_mainSmallIcon = nullptr;
 HMENU g_trayMenu = nullptr;
 NOTIFYICONDATAW g_trayIcon{};
 bool g_trayIconAdded = false;
@@ -141,7 +145,7 @@ void UpdateCountsUi() {
     // mouse/keyboard counting off, hide the matching labels instead of showing
     // stale numbers. Shown/hidden together so the grid never shifts per-row.
     static constexpr int kMouseCountIds[] = {
-        IDC_LBL_MOUSETOTAL, IDC_TXT_MOUSETOTAL,
+        IDC_LBL_MOUSETOTAL, IDC_TXT_MOUSETOTAL, IDC_BTN_RESET_MOUSECOUNT,
         IDC_TXT_BTN_LEFT, IDC_TXT_BTN_MIDDLE,
         IDC_TXT_BTN_RIGHT, IDC_TXT_BTN_X1, IDC_TXT_BTN_X2,
     };
@@ -152,6 +156,7 @@ void UpdateCountsUi() {
     const int keyCmd = g_settings.enableKeyboardCount ? SW_SHOW : SW_HIDE;
     ShowWindow(GetDlgItem(g_mainWindow, IDC_LBL_KEYTOTAL), keyCmd);
     ShowWindow(GetDlgItem(g_mainWindow, IDC_TXT_KEYTOTAL), keyCmd);
+    ShowWindow(GetDlgItem(g_mainWindow, IDC_BTN_RESET_KEYCOUNT), keyCmd);
 
     UpdateCountTexts(g_mainWindow);
 }
@@ -1028,9 +1033,11 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
             g_instance, MAKEINTRESOURCEW(IDI_CLICKSHOW), IMAGE_ICON,
             GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
         if (bigIcon != nullptr) {
+            g_mainBigIcon = bigIcon;
             SendMessageW(window, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(bigIcon));
         }
         if (smallIcon != nullptr) {
+            g_mainSmallIcon = smallIcon;
             SendMessageW(window, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
         }
 
@@ -1291,6 +1298,15 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         g_overlay.Stop();
         SaveCountsOnly();
         RemoveTrayIcon();
+        // Free the icons loaded for this window; WM_SETICON never owned them.
+        if (g_mainBigIcon != nullptr) {
+            DestroyIcon(g_mainBigIcon);
+            g_mainBigIcon = nullptr;
+        }
+        if (g_mainSmallIcon != nullptr) {
+            DestroyIcon(g_mainSmallIcon);
+            g_mainSmallIcon = nullptr;
+        }
         // Stop touching this HWND from any later callback: Windows may recycle
         // the handle value once the message loop finishes.
         g_mainWindow = nullptr;

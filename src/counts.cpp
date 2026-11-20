@@ -16,6 +16,12 @@ const wchar_t* const kIniKeys[kButtonCount] = {L"left", L"middle", L"right", L"x
 constexpr wchar_t kFallbackSection[] = L"fallback";
 constexpr wchar_t kFallbackKey[] = L"pending";
 
+// A counter above this cannot be real history: 10^12 events at 10 clicks per
+// second would take over 3000 years. Anything larger means a negative value
+// wrapped around or the file was corrupted, so the entry is discarded instead
+// of trusted and written back.
+constexpr unsigned long long kMaxPlausibleCount = 1000000000000ULL;
+
 bool HasPendingLegacyFallback(const std::wstring& legacyPath) {
     if (legacyPath.empty()) {
         return false;
@@ -144,9 +150,19 @@ bool CountStore::LoadJson() {
             continue;
         }
         const int index = clickshow::MouseButtonIndexFromKey(key->AsInt64(-1));
-        if (index >= 0) {
-            counts_[index] = value->AsUInt64(0);
+        if (index < 0) {
+            continue;
         }
+        // Drop a negative or absurd value rather than storing UINT64_MAX: the
+        // wrapped number would be displayed and then written straight back,
+        // poisoning every later save. The file itself still parses, so this is
+        // repaired on the next save instead of blocking writes forever.
+        unsigned long long parsed = 0;
+        if (!value->TryGetUInt64(parsed) || parsed > kMaxPlausibleCount) {
+            LogError(L"Counts.LoadJson", L"忽略非法计数值：" + value->text);
+            continue;
+        }
+        counts_[index] = parsed;
     }
     return true;
 }
@@ -288,7 +304,12 @@ void KeyCountStore::Load() {
         }
         const long long vkey = key->AsInt64(-1);
         if (vkey >= 0 && vkey < kVirtualKeyCount) {
-            counts_[static_cast<size_t>(vkey)] = value->AsUInt64(0);
+            unsigned long long parsed = 0;
+            if (!value->TryGetUInt64(parsed) || parsed > kMaxPlausibleCount) {
+                LogError(L"KeyCounts.Load", L"忽略非法按键计数值：" + value->text);
+                continue;
+            }
+            counts_[static_cast<size_t>(vkey)] = parsed;
         }
     }
 

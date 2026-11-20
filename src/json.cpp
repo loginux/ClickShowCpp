@@ -1,5 +1,6 @@
 #include "json.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
@@ -328,11 +329,23 @@ long long Value::AsInt64(long long fallback) const {
     return _wcstoi64(text.c_str(), nullptr, 10);
 }
 
-unsigned long long Value::AsUInt64(unsigned long long fallback) const {
-    if (type != Type::Number) {
-        return fallback;
+bool Value::TryGetUInt64(unsigned long long& out) const {
+    if (type != Type::Number || text.empty() || text[0] == L'-') {
+        return false;
     }
-    return _wcstoui64(text.c_str(), nullptr, 10);
+    errno = 0;
+    wchar_t* end = nullptr;
+    const unsigned long long parsed = _wcstoui64(text.c_str(), &end, 10);
+    if (end == text.c_str() || errno == ERANGE) {
+        return false;
+    }
+    out = parsed;
+    return true;
+}
+
+unsigned long long Value::AsUInt64(unsigned long long fallback) const {
+    unsigned long long value = 0;
+    return TryGetUInt64(value) ? value : fallback;
 }
 
 const Value* Value::Find(const std::wstring& key) const {

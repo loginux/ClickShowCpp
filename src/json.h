@@ -30,6 +30,9 @@ struct Value {
     double AsDouble(double fallback = 0.0) const;
     long long AsInt64(long long fallback = 0) const;
     unsigned long long AsUInt64(unsigned long long fallback = 0) const;
+    // Strict parse for values that must never wrap: rejects a leading '-' and
+    // ERANGE overflow, which _wcstoui64 silently turns into UINT64_MAX.
+    bool TryGetUInt64(unsigned long long& out) const;
 
     const Value* Find(const std::wstring& key) const;
 };

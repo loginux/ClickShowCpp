@@ -91,6 +91,11 @@ private:
     ULONGLONG parkedSince_ = 0;
     bool hasParkedCursor_ = false;
     bool remoteControl_ = false;
+    // When a takeover lasts too long (pointer-locked game), give up suppressing
+    // until the cursor physically moves again; otherwise the app would count
+    // nothing for the whole session.
+    ULONGLONG remoteSince_ = 0;
+    bool gaveUp_ = false;
 
     // Tracks which keys are physically down so WM_KEYDOWN auto-repeat (sent
     // continuously while a key is held) only produces a single count. Reset on
