@@ -25,6 +25,8 @@ public:
     bool Tick(ULONGLONG now);
     void Hide();
     bool IsActive() const { return active_; }
+    void ReleaseSurface();
+    ULONGLONG LastActiveTick() const { return lastActiveTick_; }
 
 private:
     static LRESULT CALLBACK WndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam);
@@ -35,9 +37,11 @@ private:
     HWND window_ = nullptr;
     HDC memoryDc_ = nullptr;
     HBITMAP dib_ = nullptr;
+    HGDIOBJ oldBitmap_ = nullptr;
     void* bits_ = nullptr;
     std::unique_ptr<Gdiplus::Bitmap> bitmap_;
     std::unique_ptr<Gdiplus::Graphics> graphics_;
+    std::unique_ptr<Gdiplus::Pen> pen_;
     int pixelSize_ = 0;
     UINT dpi_ = 96;
     COLORREF color_ = RGB(0, 0, 0);
@@ -45,6 +49,7 @@ private:
     bool active_ = false;
     bool down_ = true;
     ULONGLONG startTick_ = 0;
+    ULONGLONG lastActiveTick_ = 0;
     ULONGLONG durationMs_ = 400;
     POINT origin_{};
     static ATOM classAtom_;
@@ -72,6 +77,7 @@ private:
     HWND window_ = nullptr;
     HDC memoryDc_ = nullptr;
     HBITMAP dib_ = nullptr;
+    HGDIOBJ oldBitmap_ = nullptr;
     void* bits_ = nullptr;
     std::unique_ptr<Gdiplus::Bitmap> bitmap_;
     std::unique_ptr<Gdiplus::Graphics> graphics_;

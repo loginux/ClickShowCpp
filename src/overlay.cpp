@@ -12,6 +12,10 @@ namespace {
 constexpr wchar_t kRippleClassName[] = L"ClickShowRippleWindow";
 constexpr wchar_t kHoverClassName[] = L"ClickShowHoverWindow";
 
+// An inactive ripple keeps its window but drops its DIB/GDI+ surface once it
+// has been idle this long, so a pool of 32 ripples does not pin 32 surfaces.
+constexpr ULONGLONG kRippleSurfaceIdleMs = 10000;
+
 // Both overlay windows are click-through, non-activating layered windows and
 // have exactly the same message handling.
 LRESULT CALLBACK LayeredWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -69,21 +73,32 @@ bool RippleWindow::Create(HINSTANCE instance) {
 
 void RippleWindow::Destroy() {
     Hide();
+    ReleaseSurface();
+    if (window_ != nullptr) {
+        DestroyWindow(window_);
+        window_ = nullptr;
+    }
+    pen_.reset();
+}
+
+void RippleWindow::ReleaseSurface() {
     graphics_.reset();
     bitmap_.reset();
     if (memoryDc_ != nullptr) {
+        // Put the stock bitmap back before deleting the DC so the DIB is no
+        // longer selected, and never delete the stock object SelectObject gave us.
+        if (oldBitmap_ != nullptr) {
+            SelectObject(memoryDc_, oldBitmap_);
+            oldBitmap_ = nullptr;
+        }
         DeleteDC(memoryDc_);
         memoryDc_ = nullptr;
     }
     if (dib_ != nullptr) {
         DeleteObject(dib_);
         dib_ = nullptr;
-        bits_ = nullptr;
     }
-    if (window_ != nullptr) {
-        DestroyWindow(window_);
-        window_ = nullptr;
-    }
+    bits_ = nullptr;
     pixelSize_ = 0;
 }
 
@@ -95,18 +110,7 @@ void RippleWindow::EnsureSurface(int pixelSize) {
         return;
     }
 
-    graphics_.reset();
-    bitmap_.reset();
-    if (memoryDc_ != nullptr) {
-        DeleteDC(memoryDc_);
-        memoryDc_ = nullptr;
-    }
-    if (dib_ != nullptr) {
-        DeleteObject(dib_);
-        dib_ = nullptr;
-        bits_ = nullptr;
-    }
-
+    ReleaseSurface();
     pixelSize_ = pixelSize;
 
     BITMAPINFO info{};
@@ -130,7 +134,7 @@ void RippleWindow::EnsureSurface(int pixelSize) {
         LogError(L"Ripple.CreateDc", Win32ErrorMessage(GetLastError()));
         return;
     }
-    SelectObject(memoryDc_, dib_);
+    oldBitmap_ = SelectObject(memoryDc_, dib_);
 
     bitmap_ = std::make_unique<Bitmap>(pixelSize, pixelSize, pixelSize * 4,
                                        PixelFormat32bppPARGB, static_cast<BYTE*>(bits_));
@@ -168,9 +172,14 @@ void RippleWindow::Render(double progress) {
     alphaValue = std::clamp(alphaValue, 0, 255);
 
     const Color color(static_cast<BYTE>(alphaValue), GetRValue(color_), GetGValue(color_), GetBValue(color_));
-    Pen pen(color, penWidth);
+    if (pen_ == nullptr) {
+        pen_ = std::make_unique<Gdiplus::Pen>(color, penWidth);
+    } else {
+        pen_->SetColor(color);
+        pen_->SetWidth(penWidth);
+    }
     const REAL offset = static_cast<REAL>((pixelSize_ - diameter) / 2.0);
-    graphics_->DrawEllipse(&pen, offset, offset, static_cast<REAL>(diameter), static_cast<REAL>(diameter));
+    graphics_->DrawEllipse(pen_.get(), offset, offset, static_cast<REAL>(diameter), static_cast<REAL>(diameter));
     graphics_->Flush(FlushIntentionSync);
     UpdateLayered();
 }
@@ -198,6 +207,7 @@ void RippleWindow::Start(COLORREF color, BYTE baseAlpha, bool down, POINT point,
 
     active_ = true;
     startTick_ = GetTickCount64();
+    lastActiveTick_ = startTick_;
     durationMs_ = down ? 400 : 300;
     origin_.x = point.x - pixelSize / 2;
     origin_.y = point.y - pixelSize / 2;
@@ -212,6 +222,7 @@ bool RippleWindow::Tick(ULONGLONG now) {
     if (!active_) {
         return false;
     }
+    lastActiveTick_ = now;
     const double progress = durationMs_ > 0
         ? static_cast<double>(now - startTick_) / static_cast<double>(durationMs_)
         : 1.0;
@@ -270,6 +281,10 @@ void HoverWindow::Destroy() {
     graphics_.reset();
     bitmap_.reset();
     if (memoryDc_ != nullptr) {
+        if (oldBitmap_ != nullptr) {
+            SelectObject(memoryDc_, oldBitmap_);
+            oldBitmap_ = nullptr;
+        }
         DeleteDC(memoryDc_);
         memoryDc_ = nullptr;
     }
@@ -299,6 +314,10 @@ void HoverWindow::EnsureSurface(int pixelSize) {
     graphics_.reset();
     bitmap_.reset();
     if (memoryDc_ != nullptr) {
+        if (oldBitmap_ != nullptr) {
+            SelectObject(memoryDc_, oldBitmap_);
+            oldBitmap_ = nullptr;
+        }
         DeleteDC(memoryDc_);
         memoryDc_ = nullptr;
     }
@@ -331,7 +350,7 @@ void HoverWindow::EnsureSurface(int pixelSize) {
         LogError(L"Hover.CreateDc", Win32ErrorMessage(GetLastError()));
         return;
     }
-    SelectObject(memoryDc_, dib_);
+    oldBitmap_ = SelectObject(memoryDc_, dib_);
 
     bitmap_ = std::make_unique<Bitmap>(pixelSize, pixelSize, pixelSize * 4,
                                        PixelFormat32bppPARGB, static_cast<BYTE*>(bits_));
@@ -540,8 +559,12 @@ void Overlay::Tick() {
     bool anyActive = false;
 
     for (auto& ripple : ripples_) {
-        if (ripple->IsActive() && ripple->Tick(now)) {
-            anyActive = true;
+        if (ripple->IsActive()) {
+            if (ripple->Tick(now)) {
+                anyActive = true;
+            }
+        } else if (now - ripple->LastActiveTick() >= kRippleSurfaceIdleMs) {
+            ripple->ReleaseSurface();
         }
     }
 

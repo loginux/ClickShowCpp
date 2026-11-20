@@ -255,27 +255,37 @@ bool Parser::ParseNumber(Value& out) {
     if (text_[position_] == L'-') {
         ++position_;
     }
+    const size_t integerStart = position_;
     while (position_ < text_.size() && iswdigit(text_[position_])) {
         ++position_;
     }
+    if (position_ == integerStart) {
+        return Fail(L"invalid number");
+    }
+
     if (position_ < text_.size() && text_[position_] == L'.') {
         ++position_;
+        const size_t fractionStart = position_;
         while (position_ < text_.size() && iswdigit(text_[position_])) {
             ++position_;
         }
+        if (position_ == fractionStart) {
+            return Fail(L"invalid number");
+        }
     }
+
     if (position_ < text_.size() && (text_[position_] == L'e' || text_[position_] == L'E')) {
         ++position_;
         if (position_ < text_.size() && (text_[position_] == L'+' || text_[position_] == L'-')) {
             ++position_;
         }
+        const size_t exponentStart = position_;
         while (position_ < text_.size() && iswdigit(text_[position_])) {
             ++position_;
         }
-    }
-
-    if (position_ == start) {
-        return Fail(L"invalid number");
+        if (position_ == exponentStart) {
+            return Fail(L"invalid number");
+        }
     }
 
     out.type = Value::Type::Number;

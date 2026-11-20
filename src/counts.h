@@ -20,6 +20,7 @@ public:
 private:
     bool LoadJson();
     bool LoadIni();
+    bool PrimaryFileIsHealthy() const;
     bool SaveJson() const;
     bool SaveIni() const;
 
@@ -46,6 +47,8 @@ public:
     uint64_t Total() const;
 
 private:
+    bool PrimaryFileIsHealthy() const;
+
     std::wstring path_;
     std::array<uint64_t, kVirtualKeyCount> counts_{};
     bool loadFailed_ = false;

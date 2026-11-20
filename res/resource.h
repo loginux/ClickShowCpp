@@ -33,7 +33,6 @@
 #define IDC_BTN_DEFAULT             1051
 #define IDC_BTN_HOME                1052
 #define IDC_BTN_EXIT                1053
-#define IDC_LBL_NEWVERSION          1054
 #define IDC_BTN_RESET_MOUSECOUNT    1055
 #define IDC_TXT_MOUSETOTAL          1056
 #define IDC_TXT_KEYTOTAL            1057

@@ -5,7 +5,6 @@
 #include <commdlg.h>
 #include <shellapi.h>
 #include <gdiplus.h>
-#include <winhttp.h>
 #include <objbase.h>
 
 #include <algorithm>
@@ -14,9 +13,7 @@
 #include <cwchar>
 #include <iterator>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,13 +31,12 @@ constexpr UINT_PTR kTimerSave = 2;
 constexpr UINT_PTR kTimerCounts = 3;
 constexpr UINT_PTR kTimerScreenshot = 4;
 constexpr UINT_PTR kTimerRefreshCounts = 5;
+// Interactive screenshot tools can stay open longer than a PrintScreen blink.
+constexpr UINT kScreenshotHideMs = 5000;
 
 constexpr UINT kTrayMessage = WM_APP + 1;
-constexpr UINT kUpdateMessage = WM_APP + 2;
 
-constexpr wchar_t kAppVersion[] = CLICKSHOW_VERSION_WSTRING;
 constexpr wchar_t kHomepageUrl[] = L"https://github.com/loginux/ClickShowCpp";
-constexpr wchar_t kReleasePageUrl[] = L"https://github.com/loginux/ClickShowCpp/releases";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"ClickShowCpp";
 
@@ -62,6 +58,8 @@ NOTIFYICONDATAW g_trayIcon{};
 bool g_trayIconAdded = false;
 bool g_trayIconOwned = false;
 std::atomic<bool> g_exiting{false};
+std::atomic<bool> g_shuttingDown{false};
+bool g_saveFailureNotified = false;
 UINT g_taskbarCreatedMessage = 0;
 ULONG_PTR g_gdiplusToken = 0;
 
@@ -81,26 +79,15 @@ struct ButtonState {
 
 ButtonState g_buttonStates[clickshow::kButtonCount]{};
 
-struct UpdateResult {
-    std::wstring raw;
-    std::wstring version;
-    std::wstring url;
-};
-
-// The update check runs on a worker thread. Its result is handed to the UI
-// thread through this mutex-protected slot instead of a raw pointer in the
-// message LPARAM, so a stale/reused HWND can never receive a dangling pointer.
-HANDLE g_updateCancelEvent = nullptr;
-std::thread g_updateThread;
-std::mutex g_updateMutex;
-std::unique_ptr<UpdateResult> g_updateResult;
-
 void SaveSettingsOnly();
 void SaveCountsOnly();
+void NotifySaveFailure();
 void UpdateCountsUi();
 void UpdateCountTexts(HWND window);
 void ScheduleSave();
 void SetControlsFromSettings();
+void CenterWindowOnNearestMonitor(HWND window);
+void SetSafeDefaultButton(HWND window);
 void ShowMainWindow();
 void ExitApplication();
 void OnInputButton(clickshow::InputButton button, bool down, POINT point);
@@ -112,32 +99,41 @@ bool IsAutoStartEnabled();
 bool SetAutoStart(bool enable);
 void AddTrayIcon();
 void RemoveTrayIcon();
-void StartUpdateCheck();
-void StopUpdateCheck();
-std::unique_ptr<UpdateResult> FetchUpdate();
 int ColorButtonIndex(UINT controlId);
 int CheckboxButtonIndex(UINT controlId);
 bool IsLightColor(COLORREF color);
 void DrawColorButton(const DRAWITEMSTRUCT* item);
 void ChooseColorForButton(UINT controlId);
 
+void NotifySaveFailure() {
+    if (g_saveFailureNotified || g_shuttingDown.load() || g_exiting.load()) {
+        return;
+    }
+    g_saveFailureNotified = true;
+    MessageBoxW(g_mainWindow, L"设置或计数保存失败，本次改动可能不会保留。", L"ClickShow",
+                MB_OK | MB_ICONWARNING | MB_TOPMOST);
+}
+
 void SaveSettingsOnly() {
     if (!g_settingsStore.Save(g_settings)) {
         clickshow::LogError(L"SaveSettings", L"写入设置失败");
+        NotifySaveFailure();
     }
 }
 
 void SaveCountsOnly() {
     if (!g_counts.Save()) {
         clickshow::LogError(L"SaveCounts", L"写入计数失败");
+        NotifySaveFailure();
     }
     if (!g_keyCounts.Save()) {
         clickshow::LogError(L"SaveKeyCounts", L"写入键盘计数失败");
+        NotifySaveFailure();
     }
 }
 
 void UpdateCountsUi() {
-    if (g_mainWindow == nullptr) {
+    if (g_mainWindow == nullptr || !IsWindowVisible(g_mainWindow)) {
         return;
     }
 
@@ -278,6 +274,37 @@ bool SetAutoStart(bool enable) {
     return ok;
 }
 
+void CenterWindowOnNearestMonitor(HWND window) {
+    RECT rect{};
+    if (window == nullptr || !GetWindowRect(window, &rect)) {
+        return;
+    }
+    POINT point{};
+    GetCursorPos(&point);
+    HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return;
+    }
+    const RECT& work = info.rcWork;
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    const int x = work.left + (work.right - work.left - width) / 2;
+    const int y = work.top + (work.bottom - work.top - height) / 2;
+    SetWindowPos(window, nullptr, x, y, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void SetSafeDefaultButton(HWND window) {
+    if (window == nullptr) {
+        return;
+    }
+    // The template's first push button is "defaults". Make a harmless button
+    // the default so Enter cannot silently reset all user settings.
+    SendMessageW(window, DM_SETDEFID, IDC_BTN_COUNT_INFO, 0);
+}
+
 void ShowMainWindow() {
     if (g_mainWindow == nullptr) {
         return;
@@ -288,6 +315,8 @@ void ShowMainWindow() {
         ShowWindow(g_mainWindow, SW_SHOW);
     }
     SetForegroundWindow(g_mainWindow);
+    SetSafeDefaultButton(g_mainWindow);
+    SetTimer(g_mainWindow, kTimerRefreshCounts, 1000, nullptr);
     UpdateCountsUi();
 }
 
@@ -296,6 +325,7 @@ void ExitApplication() {
         return;
     }
     g_exiting = true;
+    g_shuttingDown = true;
     if (g_mainWindow != nullptr) {
         DestroyWindow(g_mainWindow);
     } else {
@@ -360,8 +390,9 @@ void OnPrintScreen() {
     }
     g_overlay.HideForScreenshot();
     if (g_mainWindow != nullptr) {
-        // One shot: no need to poll every 50 ms for a full second.
-        SetTimer(g_mainWindow, kTimerScreenshot, 1000, nullptr);
+        // Interactive capture tools can stay open for seconds. Re-arming the
+        // same timer id extends the hidden window if another print key arrives.
+        SetTimer(g_mainWindow, kTimerScreenshot, kScreenshotHideMs, nullptr);
     }
 }
 
@@ -436,137 +467,6 @@ void RemoveTrayIcon() {
         DestroyMenu(g_trayMenu);
         g_trayMenu = nullptr;
     }
-}
-
-void StartUpdateCheck() {
-    const HWND window = g_mainWindow;
-    g_updateCancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    g_updateThread = std::thread([window]() {
-        // Wait on a cancellable event so shutdown can interrupt the 10 s delay
-        // and join the thread instead of leaving a detached thread running
-        // while the static CRT is being torn down.
-        if (g_updateCancelEvent != nullptr &&
-            WaitForSingleObject(g_updateCancelEvent, 10000) != WAIT_TIMEOUT) {
-            return;
-        }
-        if (g_exiting.load() || !IsWindow(window)) {
-            return;
-        }
-
-        auto result = FetchUpdate();
-        if (!result || g_exiting.load() || !IsWindow(window)) {
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> lock(g_updateMutex);
-            g_updateResult = std::move(result);
-        }
-        // The message carries no pointer; the UI thread picks up the result.
-        PostMessageW(window, kUpdateMessage, 0, 0);
-    });
-}
-
-void StopUpdateCheck() {
-    if (g_updateCancelEvent != nullptr) {
-        SetEvent(g_updateCancelEvent);
-    }
-    if (g_updateThread.joinable()) {
-        g_updateThread.join();
-    }
-    if (g_updateCancelEvent != nullptr) {
-        CloseHandle(g_updateCancelEvent);
-        g_updateCancelEvent = nullptr;
-    }
-}
-
-std::unique_ptr<UpdateResult> FetchUpdate() {
-    HINTERNET session = WinHttpOpen(L"ClickShowCpp/" CLICKSHOW_VERSION_WSTRING,
-                                    WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                    WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (session == nullptr || g_exiting.load()) {
-        if (session != nullptr) {
-            WinHttpCloseHandle(session);
-        }
-        return nullptr;
-    }
-    // Keep these short: StopUpdateCheck() joins this thread on exit, so a hung
-    // server must not make quitting the app appear to freeze.
-    WinHttpSetTimeouts(session, 3000, 3000, 3000, 3000);
-
-    HINTERNET connection = WinHttpConnect(session, L"helperservice.getquicker.cn",
-                                          INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (connection == nullptr) {
-        WinHttpCloseHandle(session);
-        return nullptr;
-    }
-
-    HINTERNET request = WinHttpOpenRequest(connection, L"GET", L"/clickshow/version",
-                                           nullptr, WINHTTP_NO_REFERER,
-                                           WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
-    if (request == nullptr) {
-        WinHttpCloseHandle(connection);
-        WinHttpCloseHandle(session);
-        return nullptr;
-    }
-
-    std::unique_ptr<UpdateResult> result;
-
-    if (WinHttpSendRequest(request, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-        WinHttpReceiveResponse(request, nullptr)) {
-        DWORD status = 0;
-        DWORD statusSize = sizeof(status);
-        WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize,
-                            WINHTTP_NO_HEADER_INDEX);
-
-        if (status == 200) {
-            std::string body;
-            for (;;) {
-                DWORD available = 0;
-                if (!WinHttpQueryDataAvailable(request, &available) || available == 0) {
-                    break;
-                }
-                // Cap each allocation as well as the total: a buggy or hostile
-                // server must not be able to claim a multi-gigabyte chunk.
-                const DWORD wanted = std::min<DWORD>(available, 8192);
-                std::string chunk(wanted, '\0');
-                DWORD read = 0;
-                if (!WinHttpReadData(request, chunk.data(), wanted, &read) || read == 0) {
-                    break;
-                }
-                body.append(chunk.data(), read);
-                if (body.size() > 8192) {
-                    body.resize(8192);
-                    break;
-                }
-            }
-
-            std::wstring text = clickshow::Trim(clickshow::Utf8ToWide(body));
-            if (!text.empty()) {
-                std::wstring version = text;
-                std::wstring url;
-                const size_t separator = text.find(L'|');
-                if (separator != std::wstring::npos) {
-                    version = clickshow::Trim(text.substr(0, separator));
-                    url = clickshow::Trim(text.substr(separator + 1));
-                }
-                if (clickshow::CompareVersions(version, kAppVersion) > 0) {
-                    result = std::make_unique<UpdateResult>();
-                    result->raw = text;
-                    result->version = version;
-                    result->url = url.empty() ? kReleasePageUrl : url;
-                }
-            }
-        }
-    } else {
-        clickshow::LogError(L"Update.Http", clickshow::Win32ErrorMessage(GetLastError()));
-    }
-
-    WinHttpCloseHandle(request);
-    WinHttpCloseHandle(connection);
-    WinHttpCloseHandle(session);
-    return result;
 }
 
 int ButtonIndexFromControlId(UINT controlId, const UINT (&ids)[clickshow::kButtonCount]) {
@@ -824,6 +724,29 @@ void TrackHeatMax(uint64_t& maxCount, const HeatRow& row) {
     }
 }
 
+// Quantised palette: at most 33 brushes and 4 fonts for the whole process.
+// Creating these per key per paint cost ~100 GDI allocations on every keystroke.
+HBRUSH HeatBrush(double ratio) {
+    static HBRUSH brushes[33]{};
+    const int index = std::clamp(static_cast<int>(std::lround(ratio * 32.0)), 0, 32);
+    if (brushes[index] == nullptr) {
+        brushes[index] = CreateSolidBrush(HeatColor(index / 32.0));
+    }
+    return brushes[index];
+}
+
+HFONT HeatFont(int fontSize) {
+    static HFONT fonts[4]{};
+    const int size = std::clamp(fontSize, 10, 13);
+    const int index = size - 10;
+    if (fonts[index] == nullptr) {
+        fonts[index] = CreateFontW(-size, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+                                   DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                   CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+    }
+    return fonts[index];
+}
+
 void DrawHeatKey(HDC dc, const HeatKey& key, int x, int y, int keyHeight,
                  double unitWidth, uint64_t maxCount) {
     const int width = static_cast<int>(unitWidth * key.widthMilli / 1000.0) - kHeatKeyGap;
@@ -832,9 +755,7 @@ void DrawHeatKey(HDC dc, const HeatKey& key, int x, int y, int keyHeight,
     const double ratio = maxCount > 0 ? static_cast<double>(count) / maxCount : 0.0;
     RECT cell{x, y, x + width, y + height};
 
-    HBRUSH brush = CreateSolidBrush(HeatColor(ratio));
-    FillRect(dc, &cell, brush);
-    DeleteObject(brush);
+    FillRect(dc, &cell, HeatBrush(ratio));
     FrameRect(dc, &cell, static_cast<HBRUSH>(GetStockObject(GRAY_BRUSH)));
 
     SetTextColor(dc, RGB(30, 30, 30));
@@ -889,61 +810,69 @@ void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
     // Scale the label font with the cell height so shrinking the dialog keeps
     // the text inside the keys instead of spilling across rows.
     const int fontSize = (std::max)(10, (std::min)(13, keyHeight / 2));
-    HFONT font = CreateFontW(-fontSize, 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+    HFONT font = HeatFont(fontSize);
     HFONT oldFont = static_cast<HFONT>(SelectObject(dc, font));
     SetBkMode(dc, TRANSPARENT);
 
     // --- Function row (row 0): Esc, F1..F12, then PrtSc/ScrLk/Pause. ---
     {
-        // F keys are grouped in fours (F1-F4, F5-F8, F9-F12) with a half-key
-        // gap between groups, and Esc sits alone at the far left.
-        // kRowFunction is laid out as Esc, F1..F12.
-        int x = area.left;
+        // Esc + F1..F12 fill the same 15 key-units as the number row, so F12's
+        // right edge lines up with Backspace's. The 2 spare units are split
+        // evenly across the three group gaps (after Esc, F4 and F8), which also
+        // makes those gaps a bit wider than the old half-unit.
+        constexpr int kFunctionKeys = static_cast<int>(std::size(kRowFunction));
+        static_assert(kFunctionKeys == 13, "Esc + F1..F12 occupy 13 key units");
+        constexpr int kFunctionGaps = 3;
+        const double groupGap =
+            (kHeatMainUnits - kFunctionKeys) * unitWidth / kFunctionGaps;
+
+        double x = static_cast<double>(area.left);
         const int y = area.top;
-        const int keyStep = static_cast<int>(unitWidth);
-        for (int i = 0; i < static_cast<int>(std::size(kRowFunction)); ++i) {
-            DrawHeatKey(dc, kRowFunction[i], x, y, keyHeight, unitWidth, maxCount);
-            x += keyStep;
-            // Insert a gap after Esc (i==0) and after every 4th F key (i==4,8).
+        for (int i = 0; i < kFunctionKeys; ++i) {
+            DrawHeatKey(dc, kRowFunction[i], static_cast<int>(x), y, keyHeight,
+                        unitWidth, maxCount);
+            x += unitWidth;
+            // Wider gap after Esc (i==0), after F4 (i==4) and after F8 (i==8).
             if (i == 0 || i == 4 || i == 8) {
-                x += keyStep / 2;
+                x += groupGap;
             }
         }
         // System keys sit at the far right, above the nav cluster.
-        int sx = clusterX;
+        double sx = static_cast<double>(clusterX);
         for (const HeatKey& key : kRowSys) {
-            DrawHeatKey(dc, key, sx, y, keyHeight, unitWidth, maxCount);
-            sx += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+            DrawHeatKey(dc, key, static_cast<int>(sx), y, keyHeight, unitWidth, maxCount);
+            sx += unitWidth * key.widthMilli / 1000.0;
         }
     }
 
     // --- Main block: 5 rows (rows 1..5), each 15 units wide. ---
+    // Accumulate in floating point: rounding each key to int made a 15-unit row
+    // end up ~9px short (13 keys x 0.72px lost), which pulled Backspace's right
+    // edge away from F12 above it.
     for (int r = 0; r < static_cast<int>(std::size(kHeatRows)); ++r) {
         const HeatRow& row = kHeatRows[r];
-        int x = area.left;
+        double x = static_cast<double>(area.left);
         const int y = area.top + (r + 1) * rowPitch;
         for (int i = 0; i < row.count; ++i) {
             const HeatKey& key = row.keys[i];
-            DrawHeatKey(dc, key, x, y, keyHeight, unitWidth, maxCount);
-            x += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+            DrawHeatKey(dc, key, static_cast<int>(x), y, keyHeight, unitWidth, maxCount);
+            x += unitWidth * key.widthMilli / 1000.0;
         }
     }
 
     // --- Nav cluster (3x2): rows 1..2, right of the main block. ---
     {
-        int x = clusterX;
+        double x = static_cast<double>(clusterX);
         const int yTop = area.top + 1 * rowPitch;
         for (const HeatKey& key : kClusterTop) {
-            DrawHeatKey(dc, key, x, yTop, keyHeight, unitWidth, maxCount);
-            x += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+            DrawHeatKey(dc, key, static_cast<int>(x), yTop, keyHeight, unitWidth, maxCount);
+            x += unitWidth * key.widthMilli / 1000.0;
         }
-        x = clusterX;
+        x = static_cast<double>(clusterX);
         const int yBottom = area.top + 2 * rowPitch;
         for (const HeatKey& key : kClusterBottom) {
-            DrawHeatKey(dc, key, x, yBottom, keyHeight, unitWidth, maxCount);
-            x += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+            DrawHeatKey(dc, key, static_cast<int>(x), yBottom, keyHeight, unitWidth, maxCount);
+            x += unitWidth * key.widthMilli / 1000.0;
         }
     }
 
@@ -966,17 +895,16 @@ void DrawKeyboardHeatmap(HDC dc, const RECT& area) {
     // --- Numpad: 4 columns, rows 1..5. ---
     for (int r = 0; r < static_cast<int>(std::size(kNumpadRows)); ++r) {
         const HeatRow& row = kNumpadRows[r];
-        int x = numpadX;
+        double x = static_cast<double>(numpadX);
         const int y = area.top + (kHeatNumpadFirstRow + r) * rowPitch;
         for (int i = 0; i < row.count; ++i) {
             const HeatKey& key = row.keys[i];
-            DrawHeatKey(dc, key, x, y, keyHeight, unitWidth, maxCount);
-            x += static_cast<int>(unitWidth * key.widthMilli / 1000.0);
+            DrawHeatKey(dc, key, static_cast<int>(x), y, keyHeight, unitWidth, maxCount);
+            x += unitWidth * key.widthMilli / 1000.0;
         }
     }
 
     SelectObject(dc, oldFont);
-    DeleteObject(font);
 }
 
 // Refreshes every count label: the two totals plus one label per mouse button.
@@ -1008,15 +936,7 @@ INT_PTR CALLBACK CountInfoDlgProc(HWND window, UINT message, WPARAM wParam, LPAR
     switch (message) {
     case WM_INITDIALOG: {
         g_countInfoWindow = window;
-        RECT rect{};
-        if (GetWindowRect(window, &rect)) {
-            const int w = rect.right - rect.left;
-            const int h = rect.bottom - rect.top;
-            const int sw = GetSystemMetrics(SM_CXSCREEN);
-            const int sh = GetSystemMetrics(SM_CYSCREEN);
-            SetWindowPos(window, nullptr, (sw - w) / 2, (sh - h) / 2, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
+        CenterWindowOnNearestMonitor(window);
         // Focus is assigned in ShowCountInfo() after the window is shown;
         // SetFocus() during WM_INITDIALOG has no effect on a hidden window.
         return TRUE;
@@ -1115,18 +1035,8 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         }
 
         SetControlsFromSettings();
-        ShowWindow(GetDlgItem(window, IDC_LBL_NEWVERSION), SW_HIDE);
         UpdateCountTexts(window);
-
-        RECT rect{};
-        if (GetWindowRect(window, &rect)) {
-            const int width = rect.right - rect.left;
-            const int height = rect.bottom - rect.top;
-            const int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-            const int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-            SetWindowPos(window, nullptr, (screenWidth - width) / 2, (screenHeight - height) / 2,
-                         0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
+        CenterWindowOnNearestMonitor(window);
         return TRUE;
     }
 
@@ -1281,15 +1191,6 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         DrawColorButton(reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
         return TRUE;
 
-    case WM_CTLCOLORSTATIC:
-        if (GetDlgCtrlID(reinterpret_cast<HWND>(lParam)) == IDC_LBL_NEWVERSION) {
-            HDC dc = reinterpret_cast<HDC>(wParam);
-            SetTextColor(dc, RGB(255, 69, 0));
-            SetBkMode(dc, TRANSPARENT);
-            return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_BTNFACE));
-        }
-        break;
-
     case WM_TIMER:
         switch (wParam) {
         case clickshow::kOverlayTimerId:
@@ -1337,49 +1238,18 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         break;
     }
 
-    case kUpdateMessage: {
-        std::unique_ptr<UpdateResult> result;
-        {
-            std::lock_guard<std::mutex> lock(g_updateMutex);
-            result = std::move(g_updateResult);
-        }
-        if (!result) {
-            return TRUE;
-        }
-        if (g_settings.lastNotifiedVersion == result->raw) {
-            ShowWindow(GetDlgItem(window, IDC_LBL_NEWVERSION), SW_SHOW);
-            return TRUE;
-        }
-
-        // Original app records the raw version response before asking, so a
-        // "No" answer is not asked again.
-        g_settings.lastNotifiedVersion = result->raw;
-        SaveSettingsOnly();
-
-        const std::wstring question =
-            L"ClickShow有新版本（" + result->version + L"），是否立即打开网页？";
-        if (MessageBoxW(window, question.c_str(), L"ClickShow",
-                        MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST) == IDYES) {
-            const HINSTANCE opened = ShellExecuteW(window, L"open", result->url.c_str(),
-                                                   nullptr, nullptr, SW_SHOWNORMAL);
-            if (reinterpret_cast<INT_PTR>(opened) <= 32) {
-                MessageBoxW(window, (L"无法打开网址：" + result->url).c_str(), L"ClickShow",
-                            MB_OK | MB_ICONWARNING | MB_TOPMOST);
-            }
-        }
-        return TRUE;
-    }
-
     case WM_CLOSE:
         if (g_exiting) {
             DestroyWindow(window);
         } else {
+            KillTimer(window, kTimerRefreshCounts);
             ShowWindow(window, SW_HIDE);
         }
         return TRUE;
 
     case WM_SYSCOMMAND:
         if ((wParam & 0xFFF0) == SC_MINIMIZE) {
+            KillTimer(window, kTimerRefreshCounts);
             ShowWindow(window, SW_HIDE);
             return TRUE;
         }
@@ -1391,6 +1261,7 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         break;
 
     case WM_QUERYENDSESSION:
+        g_shuttingDown = true;
         return TRUE;
 
     case WM_ENDSESSION:
@@ -1407,6 +1278,7 @@ INT_PTR CALLBACK MainDlgProc(HWND window, UINT message, WPARAM wParam, LPARAM lP
         KillTimer(window, kTimerSave);
         KillTimer(window, kTimerCounts);
         KillTimer(window, kTimerScreenshot);
+        KillTimer(window, kTimerRefreshCounts);
         KillTimer(window, clickshow::kOverlayTimerId);
 
         // Match OnClosed: settings first, then stop input, then counts and tray.
@@ -1510,8 +1382,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     SetTimer(g_mainWindow, kTimerCounts, 10 * 60 * 1000, nullptr);
-    SetTimer(g_mainWindow, kTimerRefreshCounts, 1000, nullptr);
-    StartUpdateCheck();
+    // kTimerRefreshCounts starts only while the main window is visible.
 
     MSG message{};
     int exitCode = 0;
@@ -1536,7 +1407,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
     }
 
-    StopUpdateCheck();
     g_rawInput.Stop();
     g_overlay.Stop();
     RemoveTrayIcon();

@@ -282,9 +282,20 @@ bool RawInput::TrackRemoteControl(POINT cursor, LONG dx, LONG dy, bool absolute)
         return remoteControl_;
     }
 
-    parkedTravelX_ += dx;
-    parkedTravelY_ += dy;
-    const LONG travel = std::abs(parkedTravelX_) + std::abs(parkedTravelY_);
+    // Travel is cumulative distance, not net displacement: add each packet's
+    // absolute delta independently so back-and-forth movement does not cancel
+    // itself out. Clamp each accumulator at the threshold once it reaches it,
+    // keeping both non-negative and preventing LONG overflow from repeated
+    // packets; their sum is therefore bounded as well.
+    parkedTravelX_ += std::abs(dx);
+    if (parkedTravelX_ >= kParkedMinTravel) {
+        parkedTravelX_ = kParkedMinTravel;
+    }
+    parkedTravelY_ += std::abs(dy);
+    if (parkedTravelY_ >= kParkedMinTravel) {
+        parkedTravelY_ = kParkedMinTravel;
+    }
+    const LONG travel = parkedTravelX_ + parkedTravelY_;
     const ULONGLONG frozenMs = now - parkedSince_;
 
     if (!remoteControl_ && travel >= kParkedMinTravel &&

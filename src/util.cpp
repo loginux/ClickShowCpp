@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <cwchar>
 #include <cwctype>
-#include <filesystem>
 #include <mutex>
 #include <vector>
 
@@ -89,6 +88,54 @@ std::wstring GetExePath() {
     }
 }
 
+bool PathExists(const std::wstring& path) {
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        return true;
+    }
+    const DWORD error = GetLastError();
+    // Access errors ("exists but unavailable") deliberately count as present so
+    // callers never mistake a locked file for "no config yet" and overwrite it.
+    return error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND;
+}
+
+bool EnsureParentDirectoryExists(const std::wstring& path) {
+    // The parent is everything before the last separator; a bare file name has
+    // no directory to create.
+    size_t end = path.size();
+    while (end > 0 && path[end - 1] != L'\\' && path[end - 1] != L'/') {
+        --end;
+    }
+    if (end == 0) {
+        return true;
+    }
+
+    std::wstring dirs(path, 0, end); // keep the trailing separator of the parent
+    for (wchar_t& ch : dirs) {
+        if (ch == L'/') {
+            ch = L'\\';
+        }
+    }
+
+    const bool unc = dirs.size() >= 2 && dirs[0] == L'\\' && dirs[1] == L'\\';
+    const size_t uncServerSeparator = unc ? dirs.find(L'\\', 2) : std::wstring::npos;
+
+    for (size_t i = 0; i < dirs.size(); ++i) {
+        if (dirs[i] != L'\\') {
+            continue;
+        }
+        const std::wstring prefix = dirs.substr(0, i + 1);
+        // Skip bare roots, the UNC prefix itself and the UNC server component;
+        // those are not directories we can (or need to) create.
+        if (prefix == L"\\" || prefix == L"\\\\" || i == uncServerSeparator) {
+            continue;
+        }
+        if (!CreateDirectoryW(prefix.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ReadFileUtf8(const std::wstring& path, std::wstring& text) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -103,10 +150,13 @@ bool ReadFileUtf8(const std::wstring& path, std::wstring& text) {
     }
 
     std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
+    const DWORD requested = static_cast<DWORD>(bytes.size());
     DWORD read = 0;
-    const BOOL ok = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr);
+    const BOOL ok = ReadFile(file, bytes.data(), requested, &read, nullptr);
     CloseHandle(file);
-    if (!ok) {
+    // A short read means the file changed underneath us or I/O failed; never
+    // treat a partially filled buffer as a complete config file.
+    if (!ok || read != requested) {
         return false;
     }
 
@@ -123,10 +173,9 @@ bool ReadFileUtf8(const std::wstring& path, std::wstring& text) {
 }
 
 bool WriteFileAtomicUtf8(const std::wstring& path, const std::wstring& text) {
-    std::filesystem::path target(path);
-    std::error_code error;
-    if (target.has_parent_path()) {
-        std::filesystem::create_directories(target.parent_path(), error);
+    if (!EnsureParentDirectoryExists(path)) {
+        LogError(L"WriteAtomic.Dir", Win32ErrorMessage(GetLastError()) + L" | " + path);
+        return false;
     }
 
     const std::string bytes = WideToUtf8(text);
@@ -136,14 +185,18 @@ bool WriteFileAtomicUtf8(const std::wstring& path, const std::wstring& text) {
     HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
+        LogError(L"WriteAtomic.Create", Win32ErrorMessage(GetLastError()) + L" | " + temp);
         return false;
     }
 
     DWORD written = 0;
     const BOOL ok = WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
+    const DWORD writeError = ok ? 0 : GetLastError();
     CloseHandle(file);
 
     if (!ok || written != bytes.size()) {
+        LogError(L"WriteAtomic.Write", Win32ErrorMessage(writeError) + L" | written=" +
+                 std::to_wstring(written) + L"/" + std::to_wstring(bytes.size()) + L" | " + temp);
         DeleteFileW(temp.c_str());
         return false;
     }
@@ -151,6 +204,8 @@ bool WriteFileAtomicUtf8(const std::wstring& path, const std::wstring& text) {
     // Config files are tiny; a plain rename is atomic enough. Write-through
     // would force a physical flush on every save, which is unnecessary here.
     if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        LogError(L"WriteAtomic.Move", Win32ErrorMessage(GetLastError()) + L" | " + temp +
+                 L" -> " + path);
         DeleteFileW(temp.c_str());
         return false;
     }

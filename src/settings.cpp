@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <filesystem>
 #include <string>
 #include <utility>
 
@@ -25,6 +24,17 @@ constexpr wchar_t kFallbackKey[] = L"pending";
 void Normalize(Settings& settings) {
     settings.indicatorSize = std::clamp(settings.indicatorSize, 50, 400);
     settings.hoverDotSize = std::clamp(settings.hoverDotSize, 10, 150);
+}
+
+// lround on a huge/NaN value is undefined behaviour. Out-of-range values get
+// the (already clamped) fallback instead; in-range values are safe to round.
+int RoundAndClampSize(double value, int low, int high, int fallback) {
+    if (!std::isfinite(value) || value < static_cast<double>(low) ||
+        value > static_cast<double>(high)) {
+        return std::clamp(fallback, low, high);
+    }
+    return static_cast<int>(std::clamp(std::lround(value), static_cast<long>(low),
+                                       static_cast<long>(high)));
 }
 
 } // namespace
@@ -51,12 +61,16 @@ Settings Settings::Defaults() {
 }
 
 SettingsStore::SettingsStore() {
-    path_ = GetDocumentsPath() + L"\\ClickShow.setting";
+    path_ = GetLocalAppDataPath() + L"\\ClickShow\\ClickShow.setting";
+    // Older builds kept the JSON next to the documents; migrate it forward
+    // without deleting the original.
+    migrationPath_ = GetDocumentsPath() + L"\\ClickShow.setting";
     legacyPath_ = GetLocalAppDataPath() + L"\\ClickShow\\settings.ini";
 }
 
 SettingsStore::SettingsStore(std::wstring path) : path_(std::move(path)) {
     legacyPath_ = path_ + L".ini";
+    migrationPath_ = path_ + L".migration";
 }
 
 Settings SettingsStore::Load() {
@@ -78,17 +92,8 @@ Settings SettingsStore::Load() {
         }
     }
 
-    std::error_code error;
-    const bool jsonExists = std::filesystem::exists(path_, error);
-    if (error) {
-        // We could not even stat the file (permissions, offline profile...).
-        // Treat it like an unreadable file: never write defaults over it.
-        writeBlocked_ = true;
-        Normalize(settings);
-        return settings;
-    }
-    if (jsonExists) {
-        const LoadStatus status = LoadJson(settings);
+    if (PathExists(path_)) {
+        const LoadStatus status = LoadJson(path_, settings);
         if (status == LoadStatus::Corrupt) {
             // The original app resets to defaults when ClickShow.setting is
             // corrupt, and the caller then saves those defaults immediately.
@@ -96,6 +101,20 @@ Settings SettingsStore::Load() {
         } else if (status == LoadStatus::Unavailable) {
             // Locked/transient I/O error: keep using defaults in memory but
             // never write them back, including on the normal exit save.
+            writeBlocked_ = true;
+        }
+        Normalize(settings);
+        return settings;
+    }
+
+    // The primary file is absent. An older C++ build kept the JSON in
+    // Documents; load it now so a future Save() persists it under LOCALAPPDATA.
+    // PathExists treats access errors as present, so a false here is safe.
+    if (!migrationPath_.empty() && PathExists(migrationPath_)) {
+        const LoadStatus status = LoadJson(migrationPath_, settings);
+        if (status == LoadStatus::Corrupt) {
+            loadError_ = true;
+        } else if (status == LoadStatus::Unavailable) {
             writeBlocked_ = true;
         }
         Normalize(settings);
@@ -112,12 +131,21 @@ Settings SettingsStore::Load() {
     return settings;
 }
 
+bool SettingsStore::PrimaryFileIsHealthy() const {
+    // A missing primary file is safe to (re)create. Otherwise it must be both
+    // readable and parseable before we allow an in-memory save over it.
+    if (!PathExists(path_)) {
+        return true;
+    }
+    Settings ignored = Settings::Defaults();
+    return LoadJson(path_, ignored) == LoadStatus::Ok;
+}
+
 bool SettingsStore::HasPendingLegacyFallback() const {
     if (legacyPath_.empty()) {
         return false;
     }
-    std::error_code error;
-    if (!std::filesystem::exists(legacyPath_, error)) {
+    if (!PathExists(legacyPath_)) {
         return false;
     }
     return GetPrivateProfileIntW(kFallbackSection, kFallbackKey, 0, legacyPath_.c_str()) != 0;
@@ -129,8 +157,13 @@ void SettingsStore::ClearPendingLegacyFallback() const {
 
 bool SettingsStore::Save(const Settings& settings) {
     if (writeBlocked_) {
-        LogError(L"Settings.Save", L"启动时配置文件不可读，跳过写入以免覆盖原文件");
-        return false;
+        // Not permanent: if the file disappeared or became healthy again,
+        // resume normal saving instead of blocking for the rest of the session.
+        if (!PrimaryFileIsHealthy()) {
+            LogError(L"Settings.Save", L"配置文件仍不可读，跳过写入以免覆盖原文件");
+            return false;
+        }
+        writeBlocked_ = false;
     }
     if (SaveJson(settings)) {
         // JSON is healthy again. Clear a stale pending marker from an earlier
@@ -151,17 +184,17 @@ bool SettingsStore::ConsumeLoadError() {
     return result;
 }
 
-LoadStatus SettingsStore::LoadJson(Settings& settings) const {
+LoadStatus SettingsStore::LoadJson(const std::wstring& path, Settings& settings) const {
     std::wstring text;
-    if (!ReadFileUtf8(path_, text)) {
-        LogError(L"Settings.LoadJson", L"读取 " + path_ + L" 失败，本次不覆盖文件");
+    if (!ReadFileUtf8(path, text)) {
+        LogError(L"Settings.LoadJson", L"读取 " + path + L" 失败，本次不覆盖文件");
         return LoadStatus::Unavailable;
     }
 
     std::wstring error;
     json::Value root = json::Parse(text, &error);
     if (!error.empty() || !root.IsObject()) {
-        LogError(L"Settings.LoadJson", L"解析 " + path_ + L" 失败：" + error);
+        LogError(L"Settings.LoadJson", L"解析 " + path + L" 失败：" + error);
         return LoadStatus::Corrupt;
     }
 
@@ -186,10 +219,12 @@ LoadStatus SettingsStore::LoadJson(Settings& settings) const {
         }
     }
     if (const auto* value = root.Find(L"HoverDotSize")) {
-        settings.hoverDotSize = static_cast<int>(std::lround(value->AsDouble(settings.hoverDotSize)));
+        settings.hoverDotSize = RoundAndClampSize(value->AsDouble(settings.hoverDotSize),
+                                                  10, 150, settings.hoverDotSize);
     }
     if (const auto* value = root.Find(L"IndicatorSize")) {
-        settings.indicatorSize = static_cast<int>(std::lround(value->AsDouble(settings.indicatorSize)));
+        settings.indicatorSize = RoundAndClampSize(value->AsDouble(settings.indicatorSize),
+                                                   50, 400, settings.indicatorSize);
     }
     if (const auto* value = root.Find(L"LastNotifiedVersion")) {
         settings.lastNotifiedVersion = value->AsString();
@@ -280,8 +315,7 @@ bool SettingsStore::SaveJson(const Settings& settings) const {
 }
 
 bool SettingsStore::LoadIni(Settings& settings) const {
-    std::error_code error;
-    if (!std::filesystem::exists(legacyPath_, error)) {
+    if (!PathExists(legacyPath_)) {
         return false;
     }
 
@@ -352,10 +386,9 @@ bool SettingsStore::SaveIni(const Settings& settings) const {
         return false;
     }
 
-    const auto parent = std::filesystem::path(legacyPath_).parent_path();
-    std::error_code error;
-    if (!parent.empty()) {
-        std::filesystem::create_directories(parent, error);
+    if (!EnsureParentDirectoryExists(legacyPath_)) {
+        LogError(L"Settings.SaveIni.Dir", Win32ErrorMessage(GetLastError()) + L" | " + legacyPath_);
+        return false;
     }
 
     bool ok = true;
@@ -390,6 +423,9 @@ bool SettingsStore::SaveIni(const Settings& settings) const {
         // a stale JSON file on the next start.
         ok = WritePrivateProfileStringW(kFallbackSection, kFallbackKey, L"1",
                                         legacyPath_.c_str()) != FALSE;
+    }
+    if (!ok) {
+        LogError(L"Settings.SaveIni.Write", Win32ErrorMessage(GetLastError()) + L" | " + legacyPath_);
     }
     return ok;
 }

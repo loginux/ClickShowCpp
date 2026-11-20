@@ -15,17 +15,25 @@ ClickShow 的原生 C++ / Win32 重写版，并新增**鼠标点击计数**功�
 - 托盘图标，左键打开主窗口，右键菜单退出；关闭按钮/最小化隐藏到托盘
 - 开机自动启动（HKCU Run）
 - 单实例，重复启动会提示
-- 截图排除：优先 `WDA_EXCLUDEFROMCAPTURE`；旧系统回退到 PrintScreen 时隐藏 1 秒
-- 版本检查（WinHTTP，后台线程）与打开主页
+- 截图排除：优先 `WDA_EXCLUDEFROMCAPTURE`；旧系统回退到 PrintScreen 时隐藏 5 秒
+- 不联网；仅在点击「项目主页」时打开浏览器
 - 错误日志
 - Per-monitor DPI：覆盖层按目标显示器 DPI 计算物理尺寸
 - 与原版 C# 版的配置/计数文件字节级兼容，可互相读取
 
 ## 更新记录
 
+### 2.01
+
+调整：
+
+- 键盘热力图的功能键行与主键区对齐：F12 的右边缘与 Backspace 的右边缘落在同一条竖线上。
+- Esc、F4、F8 之后的组间距加宽（0.5 键位 → 2/3 键位），功能键三组更分明。
+
 ### 2.00
 
-- 版本号升级到 2.00（里程碑版本）。功能与 1.74 完全一致，没有行为变化。
+- 版本号升级到 2.00（里程碑版本）。
+- 移除自动检查更新与 WinHTTP 依赖；程序启动后不发起任何网络请求。
 
 ### 1.74
 
@@ -159,7 +167,7 @@ ClickShow 的原生 C++ / Win32 重写版，并新增**鼠标点击计数**功�
 
 ## 快速开始
 
-要求 Windows 10/11 x64、Visual Studio Build Tools（MSVC + Windows SDK）、CMake 3.20+、Ninja。
+支持 Windows 7 SP1 / 10 / 11 x64。构建需要 Visual Studio Build Tools（MSVC + Windows SDK）、CMake 3.20+、Ninja。
 
 ```bat
 build.bat

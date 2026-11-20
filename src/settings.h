@@ -69,7 +69,8 @@ public:
     const std::wstring& Path() const { return path_; }
 
 private:
-    LoadStatus LoadJson(Settings& settings) const;
+    LoadStatus LoadJson(const std::wstring& path, Settings& settings) const;
+    bool PrimaryFileIsHealthy() const;
     bool HasPendingLegacyFallback() const;
     void ClearPendingLegacyFallback() const;
     bool LoadIni(Settings& settings) const;
@@ -78,6 +79,7 @@ private:
 
     std::wstring path_;
     std::wstring legacyPath_;
+    std::wstring migrationPath_;
     bool loadError_ = false;
     bool writeBlocked_ = false;
 };

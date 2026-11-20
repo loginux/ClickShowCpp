@@ -43,12 +43,12 @@ if errorlevel 1 (
 )
 
 cl /nologo /std:c++20 /EHsc /utf-8 /MT /O2 /W4 /permissive- ^
-    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DNDEBUG /D_WIN32_WINNT=0x0A00 ^
+    /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DNDEBUG /D_WIN32_WINNT=0x0601 ^
     /I "..\src" /I "..\res" ^
     "..\src\main.cpp" "..\src\util.cpp" "..\src\json.cpp" "..\src\settings.cpp" "..\src\counts.cpp" "..\src\input.cpp" "..\src\overlay.cpp" ^
     app.res ^
     /link /SUBSYSTEM:WINDOWS /MANIFEST:NO /OUT:ClickShow.exe ^
-    user32.lib gdi32.lib gdiplus.lib shell32.lib advapi32.lib winhttp.lib comctl32.lib comdlg32.lib ole32.lib
+    user32.lib gdi32.lib gdiplus.lib shell32.lib advapi32.lib comctl32.lib comdlg32.lib ole32.lib
 if errorlevel 1 (
     popd
     goto :fail

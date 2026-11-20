@@ -6,7 +6,6 @@
 
 #include <cstdlib>
 #include <cwchar>
-#include <filesystem>
 #include <string>
 #include <utility>
 
@@ -21,8 +20,7 @@ bool HasPendingLegacyFallback(const std::wstring& legacyPath) {
     if (legacyPath.empty()) {
         return false;
     }
-    std::error_code error;
-    if (!std::filesystem::exists(legacyPath, error)) {
+    if (!PathExists(legacyPath)) {
         return false;
     }
     return GetPrivateProfileIntW(kFallbackSection, kFallbackKey, 0, legacyPath.c_str()) != 0;
@@ -61,14 +59,9 @@ void CountStore::Load() {
         return;
     }
 
-    std::error_code error;
-    const bool jsonExists = std::filesystem::exists(path_, error);
-    if (error) {
-        loadFailed_ = true;
-        LogError(L"Counts.LoadJson", L"无法检查 " + path_ + L"，本次不写回计数");
-        return;
-    }
-    if (jsonExists) {
+    // PathExists counts access errors as present; LoadJson then fails and
+    // blocks writes, so a locked file is still never replaced with zeros.
+    if (PathExists(path_)) {
         if (!LoadJson()) {
             // Keep the file intact: an unreadable/corrupt counts file must not
             // be silently overwritten by the next periodic save.
@@ -81,10 +74,32 @@ void CountStore::Load() {
     LoadIni();
 }
 
+bool CountStore::PrimaryFileIsHealthy() const {
+    if (!PathExists(path_)) {
+        return true;
+    }
+    std::wstring text;
+    if (!ReadFileUtf8(path_, text)) {
+        return false;
+    }
+    std::wstring error;
+    const json::Value root = json::Parse(text, &error);
+    if (!error.empty() || !root.IsObject()) {
+        return false;
+    }
+    const auto* array = root.Find(L"Counts");
+    return array != nullptr && array->IsArray();
+}
+
 bool CountStore::Save() {
     if (loadFailed_) {
-        LogError(L"Counts.Save", L"启动时计数文件不可用，跳过写回以免覆盖原文件");
-        return false;
+        // Recheck instead of blocking forever: an absent or healthy-again file
+        // is safe to write, but an unreadable/corrupt one must be left intact.
+        if (!PrimaryFileIsHealthy()) {
+            LogError(L"Counts.Save", L"计数文件仍不可用，跳过写回以免覆盖原文件");
+            return false;
+        }
+        loadFailed_ = false;
     }
     if (SaveJson()) {
         // JSON is healthy again. Clear a stale pending marker left by an
@@ -158,8 +173,7 @@ bool CountStore::SaveJson() const {
 }
 
 bool CountStore::LoadIni() {
-    std::error_code error;
-    if (!std::filesystem::exists(legacyPath_, error)) {
+    if (!PathExists(legacyPath_)) {
         return false;
     }
 
@@ -167,7 +181,10 @@ bool CountStore::LoadIni() {
         wchar_t buffer[64]{};
         GetPrivateProfileStringW(L"counts", kIniKeys[index], L"0", buffer, ARRAYSIZE(buffer),
                                  legacyPath_.c_str());
-        counts_[index] = _wcstoui64(buffer, nullptr, 10);
+        wchar_t* end = nullptr;
+        const uint64_t parsed = static_cast<uint64_t>(_wcstoui64(buffer, &end, 10));
+        // Only a fully consumed, non-empty numeric string is accepted.
+        counts_[index] = (end != buffer && *end == L'\0') ? parsed : 0;
     }
     return true;
 }
@@ -177,10 +194,9 @@ bool CountStore::SaveIni() const {
         return false;
     }
 
-    const auto parent = std::filesystem::path(legacyPath_).parent_path();
-    std::error_code error;
-    if (!parent.empty()) {
-        std::filesystem::create_directories(parent, error);
+    if (!EnsureParentDirectoryExists(legacyPath_)) {
+        LogError(L"Counts.SaveIni.Dir", Win32ErrorMessage(GetLastError()) + L" | " + legacyPath_);
+        return false;
     }
 
     bool ok = true;
@@ -192,6 +208,9 @@ bool CountStore::SaveIni() const {
     if (ok) {
         ok = WritePrivateProfileStringW(kFallbackSection, kFallbackKey, L"1",
                                         legacyPath_.c_str()) != FALSE;
+    }
+    if (!ok) {
+        LogError(L"Counts.SaveIni.Write", Win32ErrorMessage(GetLastError()) + L" | " + legacyPath_);
     }
     return ok;
 }
@@ -238,9 +257,7 @@ void KeyCountStore::Load() {
         // exists but could not be read (locked, permissions, >16MB), keep the
         // in-memory zeros but block writes so the periodic save cannot wipe the
         // real file. This matches CountStore::Load()'s protect-the-file policy.
-        std::error_code error;
-        const bool exists = std::filesystem::exists(path_, error);
-        if (error || exists) {
+        if (PathExists(path_)) {
             loadFailed_ = true;
             LogError(L"KeyCounts.Load", L"读取或检查 " + path_ + L" 失败，本次不写回");
         }
@@ -309,10 +326,30 @@ void KeyCountStore::Load() {
     }
 }
 
+bool KeyCountStore::PrimaryFileIsHealthy() const {
+    if (!PathExists(path_)) {
+        return true;
+    }
+    std::wstring text;
+    if (!ReadFileUtf8(path_, text)) {
+        return false;
+    }
+    std::wstring error;
+    const json::Value root = json::Parse(text, &error);
+    if (!error.empty() || !root.IsObject()) {
+        return false;
+    }
+    const auto* keys = root.Find(L"Keys");
+    return keys != nullptr && keys->IsArray();
+}
+
 bool KeyCountStore::Save() {
     if (loadFailed_) {
-        LogError(L"KeyCounts.Save", L"启动时键盘计数文件不可用，跳过写回");
-        return false;
+        if (!PrimaryFileIsHealthy()) {
+            LogError(L"KeyCounts.Save", L"键盘计数文件仍不可用，跳过写回");
+            return false;
+        }
+        loadFailed_ = false;
     }
 
     std::wstring out = L"{\"Keys\":[";

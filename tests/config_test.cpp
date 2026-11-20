@@ -9,6 +9,10 @@
 
 namespace {
 
+// Keep isolated: every test below creates its own temporary paths. Never
+// construct a default store here, since that would read the real user's config
+// and make results machine-dependent.
+
 int g_failures = 0;
 
 void Check(bool ok, const wchar_t* what, int line) {
@@ -19,43 +23,6 @@ void Check(bool ok, const wchar_t* what, int line) {
 }
 
 #define CHECK(expression, description) Check((expression), (description), __LINE__)
-
-const wchar_t* ButtonName(int index) {
-    switch (index) {
-    case 0: return L"Left";
-    case 1: return L"Middle";
-    case 2: return L"Right";
-    case 3: return L"X1";
-    case 4: return L"X2";
-    default: return L"?";
-    }
-}
-
-void PrintSettings(const wchar_t* label, const clickshow::Settings& settings) {
-    wprintf(L"%s: circle=%d hover=%d count=%d indicator=%d hoverSize=%d hoverFill=#%02X%02X%02X alpha=%02X last=%s\n",
-            label,
-            settings.enableClickCircle ? 1 : 0,
-            settings.enableHoverDot ? 1 : 0,
-            settings.enableClickCount ? 1 : 0,
-            settings.indicatorSize,
-            settings.hoverDotSize,
-            GetRValue(settings.hoverDotColor),
-            GetGValue(settings.hoverDotColor),
-            GetBValue(settings.hoverDotColor),
-            settings.hoverDotAlpha,
-            settings.lastNotifiedVersion.c_str());
-
-    for (int index = 0; index < clickshow::kButtonCount; ++index) {
-        const clickshow::ButtonSetting& button = settings.buttons[index];
-        wprintf(L"  %s: enabled=%d color=#%02X%02X%02X alpha=%02X\n",
-                ButtonName(index),
-                button.enabled ? 1 : 0,
-                GetRValue(button.color),
-                GetGValue(button.color),
-                GetBValue(button.color),
-                button.alpha);
-    }
-}
 
 void TestSettingsRoundtrip(const std::wstring& dir) {
     const std::wstring path = dir + L"\\settings.json";
@@ -86,7 +53,8 @@ void TestSettingsRoundtrip(const std::wstring& dir) {
     const clickshow::Settings loaded = store.Load();
     CHECK(!store.ConsumeLoadError(), L"a written file is not reported as corrupt");
     CHECK(loaded.enableClickCircle == false && loaded.enableHoverDot == true &&
-          loaded.enableClickCount == true, L"boolean settings round-trip");
+          loaded.enableClickCount == true,
+          L"boolean settings round-trip");
     CHECK(loaded.indicatorSize == 275 && loaded.hoverDotSize == 33,
           L"size settings round-trip");
     CHECK(loaded.hoverDotColor == settings.hoverDotColor && loaded.hoverDotAlpha == 0x77,
@@ -102,6 +70,32 @@ void TestSettingsRoundtrip(const std::wstring& dir) {
     std::wstring second;
     CHECK(clickshow::ReadFileUtf8(path, second), L"reading the second JSON succeeds");
     CHECK(json == second, L"saving is byte-stable");
+}
+
+// Explicit paths get a deterministic ".migration" companion, so this exercises
+// the Documents -> LOCALAPPDATA migration without touching the real user config.
+void TestDocumentsJsonMigration(const std::wstring& dir) {
+    const std::wstring path = dir + L"\\migrated.json";
+    const std::wstring old = path + L".migration";
+    DeleteFileW(path.c_str());
+    DeleteFileW((path + L".ini").c_str());
+    CHECK(clickshow::WriteFileAtomicUtf8(old, L"{\"IndicatorSize\":321,\"EnableHoverDot\":true}"),
+          L"writing the old Documents-style JSON succeeds");
+
+    clickshow::SettingsStore store(path);
+    const clickshow::Settings loaded = store.Load();
+    CHECK(!store.ConsumeLoadError(), L"a readable migration file is not corrupt");
+    CHECK(loaded.indicatorSize == 321 && loaded.enableHoverDot,
+          L"settings load from the migration file when the primary path is absent");
+    CHECK(store.Save(loaded), L"saving migrated settings succeeds");
+
+    std::wstring json;
+    CHECK(clickshow::ReadFileUtf8(path, json), L"reading the migrated primary file succeeds");
+    CHECK(json.find(L"\"IndicatorSize\":321") != std::wstring::npos,
+          L"migrated settings are written to the new primary path");
+    CHECK(clickshow::PathExists(old), L"the old migration file is left intact");
+    DeleteFileW(old.c_str());
+    DeleteFileW(path.c_str());
 }
 
 void TestOriginalJsonCompatibility(const std::wstring& dir) {
@@ -309,28 +303,14 @@ void TestJsonSafety() {
 } // namespace
 
 int wmain() {
-    // Informational: print the real config so C#/C++ compatibility can still
-    // be eyeballed. The assertions below are self-contained and deterministic.
-    clickshow::SettingsStore store;
-    const clickshow::Settings settings = store.Load();
-    wprintf(L"settings path: %s\n", store.Path().c_str());
-    PrintSettings(L"loaded", settings);
-
-    clickshow::CountStore counts;
-    counts.Load();
-    wprintf(L"counts: Left=%llu Middle=%llu Right=%llu X1=%llu X2=%llu Total=%llu\n",
-            static_cast<unsigned long long>(counts.Get(clickshow::kLeft)),
-            static_cast<unsigned long long>(counts.Get(clickshow::kMiddle)),
-            static_cast<unsigned long long>(counts.Get(clickshow::kRight)),
-            static_cast<unsigned long long>(counts.Get(clickshow::kX1)),
-            static_cast<unsigned long long>(counts.Get(clickshow::kX2)),
-            static_cast<unsigned long long>(counts.Total()));
+    // Tests use temp paths only; no default store is constructed here.
 
     CreateDirectoryW(L"build_direct", nullptr);
     CreateDirectoryW(L"build_direct\\config_test", nullptr);
     const std::wstring dir = L"build_direct\\config_test";
 
     TestSettingsRoundtrip(dir);
+    TestDocumentsJsonMigration(dir);
     TestOriginalJsonCompatibility(dir);
     TestPendingIniFallback(dir);
     TestPendingClearedOnHealthySave(dir);

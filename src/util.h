@@ -7,6 +7,9 @@ namespace clickshow {
 std::wstring GetLocalAppDataPath();
 std::wstring GetDocumentsPath();
 std::wstring GetExePath();
+// Win7-compatible replacements for the C++17 file API helpers.
+bool PathExists(const std::wstring& path);
+bool EnsureParentDirectoryExists(const std::wstring& path);
 bool ReadFileUtf8(const std::wstring& path, std::wstring& text);
 bool WriteFileAtomicUtf8(const std::wstring& path, const std::wstring& text);
 std::wstring Format(const wchar_t* fmt, ...);
